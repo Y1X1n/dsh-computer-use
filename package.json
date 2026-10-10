@@ -1,0 +1,64 @@
+{
+  "name": "@y1x1n/dsh-computer-use",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: let the DSH agent autonomously control the computer (screenshot / mouse / keyboard / windows / UI Automation), same effect as zcode & codex computer use.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Y1X1n/dsh-computer-use.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Y1X1n/dsh-computer-use/issues"
+  },
+  "homepage": "https://github.com/Y1X1n/dsh-computer-use#readme",
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "harness",
+    "computer-use",
+    "automation",
+    "plugin",
+    "cordis",
+    "windows"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./bridge": "./lib/bridge/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "bridge/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/bridge.test.mjs && node test/tools.test.mjs",
+    "test:bridge": "node test/bridge.test.mjs",
+    "test:tools": "node test/tools.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-settings": "0.1.5-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.1",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.5.0"
+  }
+}

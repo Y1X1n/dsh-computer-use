@@ -1,0 +1,144 @@
+# CI for dsh-computer-use — mandatory PR workflow enforcement layer.
+#
+# Runs on: every PR targeting main, every push to main (safety net), and
+# feature-branch pushes.
+#
+# Notes:
+# - This project is Windows-first (PowerShell bridge, UIA), so windows-latest
+#   is the primary runner; ubuntu-latest runs a reduced suite as a
+#   cross-platform canary.
+# - package.json scripts were not final when this workflow was written, so
+#   every npm-script step is guarded: it runs when the script exists AND when
+#   dependencies could be installed, and only warns otherwise.
+# - npm is used (not pnpm) to keep CI aligned with the zero-lockfile-first setup.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      # Feature branches: adjust or remove the glob if the list grows too noisy.
+      - 'feat/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'docs/**'
+  pull_request:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is the platform this plugin actually targets.
+        # ubuntu-latest is a canary for accidentally Windows-only code paths.
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Show versions
+        run: node --version && npm --version
+        shell: bash
+
+      # ---------------------------------------------------------------------
+      # Install dependencies (tolerant: a missing lockfile must not fail CI)
+      # ---------------------------------------------------------------------
+      - name: Install dependencies (npm ci)
+        id: install_ci
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci
+        shell: bash
+
+      - name: Install dependencies (npm install)
+        id: install_plain
+        if: steps.install_ci.outcome == 'skipped' && hashFiles('package.json') != ''
+        run: npm install --no-audit --no-fund
+        shell: bash
+
+      - name: Report install status
+        if: always()
+        run: |
+          if [ "${{ steps.install_ci.outcome }}" = "failure" ] || [ "${{ steps.install_plain.outcome }}" = "failure" ]; then
+            echo "::error::Dependency installation failed"
+            exit 1
+          fi
+          if [ "${{ steps.install_ci.outcome }}" = "skipped" ] && [ "${{ steps.install_plain.outcome }}" = "skipped" ]; then
+            echo "::warning::No package.json/package-lock.json — dependency steps skipped (bootstrap phase)"
+          fi
+        shell: bash
+
+      # ---------------------------------------------------------------------
+      # Typecheck (runs only when the "typecheck" script exists)
+      # ---------------------------------------------------------------------
+      - name: Typecheck (npm run typecheck)
+        if: hashFiles('package.json') != ''
+        run: |
+          if npm run | grep -q " typecheck"; then
+            npm run typecheck
+          else
+            echo "::warning::package.json has no 'typecheck' script — skipping"
+          fi
+        shell: bash
+
+      # ---------------------------------------------------------------------
+      # Build (runs only when the "build" script exists)
+      # ---------------------------------------------------------------------
+      - name: Build (npm run build)
+        if: hashFiles('package.json') != ''
+        run: |
+          if npm run | grep -q " build$"; then
+            npm run build
+          else
+            echo "::warning::package.json has no 'build' script — skipping"
+          fi
+        shell: bash
+
+      # ---------------------------------------------------------------------
+      # Tests. The bridge talks to real Windows APIs (SendInput, UIA,
+      # CopyFromScreen), so bridge tests are expected to be Windows-only.
+      # On ubuntu they are allowed to fail with an explicit warning instead
+      # of breaking the whole matrix; on windows-latest they must pass.
+      # ---------------------------------------------------------------------
+      - name: Test (npm test)
+        if: hashFiles('package.json') != ''
+        # Windows is the gate and must pass; ubuntu is a canary where
+        # Windows-only bridge/UIA tests are allowed to fail.
+        continue-on-error: ${{ runner.os != 'Windows' }}
+        run: |
+          if npm run | grep -q " test$"; then
+            npm test
+          else
+            echo "::warning::package.json has no 'test' script — skipping"
+          fi
+        shell: bash
+
+      - name: Test tolerance note (non-Windows canary)
+        if: always() && runner.os != 'Windows' && hashFiles('package.json') != ''
+        run: echo "::warning::Non-Windows runners run as a canary; Windows-only bridge/UIA tests may fail here by design (primary gate is windows-latest)."
+
+      # ---------------------------------------------------------------------
+      # Workflow self-check: guard scripts stay runnable everywhere.
+      # ---------------------------------------------------------------------
+      - name: Guard scripts sanity check
+        run: |
+          node --check scripts/guard/pre-push.mjs
+          node --check scripts/guard/install.mjs
+          node scripts/guard/install.mjs --status
+        shell: bash

@@ -1,0 +1,6 @@
+# dsh-computer-use composition layer: mount the Host plugin row into the profile.
+# The row is referenced by npm package name; Node module resolution finds this
+# package inside the profile's node_modules.
+- insert:
+    - id: computer-use
+      name: '@y1x1n/dsh-computer-use'

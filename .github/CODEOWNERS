@@ -1,0 +1,6 @@
+# `* @Y1X1n` — every file in this repository is owned by Y1X1n.
+# GitHub will automatically request Y1X1n's review on any PR that touches
+# any file. (Note: CODEOWNERS-based review requests need branch protection
+# with "Require review from Code Owners"; on repos without that plan
+# entitlement this file still documents ownership and works with the CI.)
+* @Y1X1n
