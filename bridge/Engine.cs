@@ -1195,6 +1195,7 @@ namespace DshComputerUse
             return Dict(
                 "heldKeys", HeldKeyNames(),
                 "overlayVisible", Overlay.IsVisible,
+                "overlayHealthy", Overlay.IsHealthy,
                 "overlaySuspended", Overlay.SuspendedForCapture);
         }
 
@@ -1849,6 +1850,9 @@ namespace DshComputerUse
         private static volatile bool _visible;
         private static int _suspends;
         private static bool _hiddenForCapture;
+        private static int _generation;
+        private static int _appliedGeneration;
+        private static volatile string _lastError;
 
         public static object Show(Dictionary<string, object> a)
         {
@@ -1859,33 +1863,92 @@ namespace DshComputerUse
                 if (!string.IsNullOrWhiteSpace(asked)) text = asked;
             }
 
+            // Monotonic state generation: a request that was overtaken by a newer
+            // one must never be the one that decides what is on screen.
+            var generation = System.Threading.Interlocked.Increment(ref _generation);
             EnsureThread();
             if (!Ready.Wait(2500))
-                throw new BridgeException("OVERLAY_UNAVAILABLE", "overlay thread did not become ready within 2.5s");
-
-            Invoke(delegate
             {
-                if (_form == null) _form = new OverlayForm(Position());
-                _form.SetLabel(text);
-                // A capture may be in flight; keep the strip out of it and let
-                // ResumeAfterCapture put it back.
-                if (!_form.Visible && _suspends == 0) _form.Show();
-                _form.Redraw();
-            });
+                _lastError = "overlay thread did not become ready within 2.5s";
+                return Dict("shown", false, "healthy", false, "generation", generation, "error", _lastError);
+            }
+            if (generation < _appliedGeneration)
+                return Dict("shown", _visible, "healthy", _lastError == null, "generation", generation, "stale", true);
+
+            try
+            {
+                Invoke(delegate
+                {
+                    if (_form == null) _form = new OverlayForm(Position());
+                    _form.SetLabel(text);
+                    // A capture may be in flight; keep the strip out of it and let
+                    // ResumeAfterCapture put it back.
+                    if (!_form.Visible && _suspends == 0) _form.Show();
+                    _form.Redraw();
+                });
+            }
+            catch (Exception ex)
+            {
+                // The strip is best-effort: a failure is reported, never thrown, so
+                // it can never fail the tool call that triggered it.
+                _lastError = ex.Message;
+                return Dict("shown", false, "healthy", false, "generation", generation, "error", _lastError);
+            }
             _visible = true;
-            return Dict("shown", true, "text", text, "width", StripWidth, "height", StripHeight);
+            _appliedGeneration = generation;
+            _lastError = null;
+            return Dict(
+                "shown", true, "healthy", true, "generation", generation,
+                "text", text, "width", StripWidth, "height", StripHeight);
         }
 
         public static object Hide()
         {
-            if (_thread != null) Invoke(delegate { if (_form != null) _form.Hide(); });
+            var generation = System.Threading.Interlocked.Increment(ref _generation);
+            if (_thread == null)
+            {
+                _visible = false;
+                _appliedGeneration = generation;
+                return Dict("shown", false, "healthy", false, "generation", generation);
+            }
+            if (generation < _appliedGeneration)
+                return Dict("shown", _visible, "healthy", _lastError == null, "generation", generation, "stale", true);
+            try
+            {
+                Invoke(delegate { if (_form != null) _form.Hide(); });
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                return Dict("shown", _visible, "healthy", false, "generation", generation, "error", _lastError);
+            }
             _visible = false;
-            return Dict("shown", false);
+            _appliedGeneration = generation;
+            _lastError = null;
+            return Dict("shown", false, "healthy", true, "generation", generation);
         }
 
         public static object State()
         {
-            return Dict("shown", _visible, "width", StripWidth, "height", StripHeight, "defaultText", DefaultText);
+            return Dict(
+                "shown", _visible,
+                "width", StripWidth,
+                "height", StripHeight,
+                "defaultText", DefaultText,
+                "healthy", IsHealthy,
+                "generation", _generation,
+                "appliedGeneration", _appliedGeneration,
+                "error", _lastError);
+        }
+
+        /// <summary>
+        /// Whether the strip can be trusted to be on screen: the UI thread is
+        /// alive and the last state change was applied without an error. Exposed so
+        /// a caller can tell "hosting silently invisible" from "hosting visible".
+        /// </summary>
+        public static bool IsHealthy
+        {
+            get { return _thread != null && _thread.IsAlive && _lastError == null; }
         }
 
         /// <summary>Whether the strip is currently on screen (used by control.state).</summary>

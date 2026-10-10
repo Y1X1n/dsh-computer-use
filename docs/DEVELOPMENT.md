@@ -82,14 +82,16 @@
 | uia.invoke | {ref?, handle?, name?, automationId?, action:'invoke'\|'select'\|'toggle'\|'expand'\|'collapse'\|'setValue'\|'focus', value?, ttlMs?} | {ref, action, ok, after:{gone,enabled,offscreen,name}} |
 | clipboard.get | {} | {text} |
 | clipboard.set | {text} | {} |
-| overlay.show | {text?} | {shown, text, width, height} |
-| overlay.hide | {} | {shown:false} |
-| overlay.state | {} | {shown, width, height, defaultText} |
-| control.state | {} | {heldKeys:[], overlayVisible, overlaySuspended} |
+| overlay.show | {text?} | {shown, healthy, generation, text, width, height[, error]} |
+| overlay.hide | {} | {shown:false, healthy, generation[, error]} |
+| overlay.state | {} | {shown, healthy, width, height, defaultText, generation, appliedGeneration, error} |
+| control.state | {} | {heldKeys:[], overlayVisible, overlayHealthy, overlaySuspended} |
 
 > `screen.capture` 的 `budgetKb`（base64 字节）与 `budgetPixels`（宽×高）是**硬预算**：超限时先按步长 15 降质（下限 40），再按 ×0.8 缩边（下限 320），像素预算先一步精确适配。返回值里的 `quality`/`base64Bytes` 是**实际写入**的值；`overlaySuspended` 表示这次截图前把托管条藏起来了。
 >
 > `overlay.*` 由插件生命周期驱动（首次工具调用 show、插件卸载/空闲 hide），也可手动调用；窗口是分层置顶椭圆条，`WS_EX_TRANSPARENT|WS_EX_NOACTIVATE` 保证鼠标穿透且不抢焦点，桥进程退出即消失。截图期间会自动 `SuspendForCapture()` 隐藏、截完恢复——否则 agent 会把自己的指示条截进观察结果。
+>
+> 悬浮条是 **best-effort**：`overlay.show/hide` **不抛异常**，失败时返回 `shown:false, healthy:false, error:"..."`，绝不因为画不出条子让工具调用失败。`healthy` = 指示器线程活着且最后一次状态变更确实应用成功；`generation`/`appliedGeneration` 是**状态代际**——被更新请求越过的旧请求不会成为最终生效的那个（`stale:true` 表示这次请求被丢弃）。插件侧的空闲隐藏同样带活动代际：已经排进事件队列的旧定时器回调不会在调用中途把条子收走。
 >
 > `keyboard.press action:'down'` 进入**输入账本**：重复按下同一键报 `INPUT_HELD`，`action:'up'` 清除；桥进程退出时 `Engine.Shutdown()` 释放所有仍按住的键，绝不让按键留在用户键盘上。`control.state` 用于查看当前账本与指示条状态。
 

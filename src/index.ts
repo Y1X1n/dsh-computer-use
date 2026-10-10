@@ -79,6 +79,7 @@ export function apply(ctx: Context, config: unknown): void {
   // bridge that cannot draw the strip must never fail a tool call.
   let overlayShown = false
   let idleTimer: ReturnType<typeof setTimeout> | null = null
+  let activityGeneration = 0
 
   const hideOverlay = (): void => {
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
@@ -89,6 +90,11 @@ export function apply(ctx: Context, config: unknown): void {
 
   const noteActivity = (): void => {
     const cfg = getConfig()
+    // Bumping the generation invalidates an idle callback that is already queued
+    // in the event loop: without it that stale callback could hide the strip in
+    // the middle of the call it was supposed to precede.
+    activityGeneration += 1
+    const generation = activityGeneration
     if (!cfg.enabled || !cfg.overlay) { hideOverlay(); return }
     if (!overlayShown) {
       overlayShown = true
@@ -96,7 +102,9 @@ export function apply(ctx: Context, config: unknown): void {
     }
     if (idleTimer) clearTimeout(idleTimer)
     if (cfg.overlayIdleHideMs > 0) {
-      idleTimer = setTimeout(hideOverlay, cfg.overlayIdleHideMs)
+      idleTimer = setTimeout(() => {
+        if (activityGeneration === generation) hideOverlay()
+      }, cfg.overlayIdleHideMs)
       ;(idleTimer as unknown as { unref?: () => void }).unref?.()
     }
   }

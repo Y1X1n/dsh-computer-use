@@ -60,7 +60,7 @@
 | 截图前隐藏指示器（`suspend_for_capture`） | Windows-MCP | ✅ `bridge/Engine.cs` `Overlay.SuspendForCapture` + `ScreenCapture` |
 | 输入账本 / 关机释放 / 拒绝重复按下 | Windows-MCP | ✅ `bridge/Engine.cs` `InputLedger` + `Engine.Shutdown()` + `computer-bridge.ps1` |
 | 缓存编译产物（Add-Type → DLL） | Yu-tao-Li-win | ✅ `bridge/computer-bridge.ps1` `Ensure-Compiled`：按源码 hash 编译到 `%LOCALAPPDATA%\dsh-computer-use\engine-cache`，实测冷启动 1090ms → 258ms |
-| 指示器 generation 与健康门控 | Windows-MCP | 待办：`Overlay.change(generation)` |
+| 指示器 generation 与健康门控 | Windows-MCP | ✅ `Overlay`：`generation`/`appliedGeneration` 状态代际、`healthy` 健康位、状态变更被确认后才算生效；`overlay.*` 改为**只回报不抛错**；插件侧空闲隐藏加活动代际 |
 | 物理接管检测 + fail-open | Windows-MCP | 待办（需真实物理输入验证） |
 | UIA ControlView + RuntimeId 寻址 | Yu-tao-Li-win / FlaUI | ✅ `Engine.cs`：`view` 默认 `control`（实测省 5–46% 字节）、ref 记 RuntimeId 做身份校验、`AutomationElement.FromHandle` 兜底非桌面子窗口 |
 | 观察令牌 + 过期拒绝 + diff | Anionex | 令牌/过期/动作后新鲜状态 ✅（`observationId` + `observationTtlMs` → `STALE_OBSERVATION` + `uia.invoke` 回 `after`）；**树 diff 仍未做**（见 `docs/DEVELOPMENT.md` §7 `uia.tree diff`） |

@@ -449,6 +449,23 @@ try {
     assert.equal(after.shown, false)
   })
 
+  await test('overlay: state reports health and the applied generation', async () => {
+    const shown = await client.call('overlay.show', { text: 'Deepseek Harness托管中' })
+    assert.equal(shown.shown, true)
+    assert.equal(shown.healthy, true, 'a strip that is on screen must report healthy')
+    assert.equal(typeof shown.generation, 'number')
+
+    const state = await client.call('overlay.state')
+    assert.equal(state.healthy, true)
+    assert.equal(state.appliedGeneration, state.generation, 'the last state change must have been applied')
+    assert.equal(state.error, null)
+
+    const hidden = await client.call('overlay.hide')
+    assert.equal(hidden.shown, false)
+    assert.equal(hidden.healthy, true, 'the indicator thread stays alive after hiding')
+    assert.equal((await client.call('control.state')).overlayHealthy, true)
+  })
+
   await test('overlay: a capture hides the strip and restores it afterwards', async () => {
     await client.call('overlay.show', {})
     const shot = await client.call('screen.capture', { format: 'jpeg', maxEdge: 640, quality: 60 })
