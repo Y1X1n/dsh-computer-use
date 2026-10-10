@@ -24,6 +24,7 @@ import {
   setDeps as setWindowDeps,
 } from '../lib/tools/windows.js'
 import { uiTool, setDeps as setUiDeps } from '../lib/tools/ui.js'
+import { waitTool, setDeps as setWaitDeps } from '../lib/tools/wait.js'
 
 /** Fake bridge: records calls, returns canned results keyed by op. */
 function fakeBridge(handlers) {
@@ -55,6 +56,8 @@ const config = {
   overlay: true,
   overlayText: 'Deepseek Harness托管中',
   overlayIdleHideMs: 180_000,
+  waitTimeoutMs: 5000,
+  waitPollMs: 250,
 }
 
 const results = []
@@ -287,7 +290,97 @@ await test('screenshot tool reports whether the strip was hidden for the capture
   assert.equal(r.overlaySuspended, true)
 })
 
-for (const set of [setScreenshotDeps, setInputDeps, setWindowDeps, setUiDeps]) set(undefined)
+await test('wait tool polls until a control appears and returns its ref', async () => {
+  let polls = 0
+  const bridge = fakeBridge({
+    'uia.find': () => {
+      polls += 1
+      return polls < 3
+        ? { matches: [], count: 0 }
+        : { matches: [{ ref: 42, role: 'Button', name: 'Save', automationId: 'save' }], count: 1 }
+    },
+  })
+  setWaitDeps({ call: bridge.call, config: () => config })
+  const r = await waitTool.execute(
+    { condition: 'control', name: 'Save', pollMs: 50, timeoutMs: 3000 },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(r.satisfied, true)
+  assert.equal(r.polls, 3)
+  assert.equal(r.control.ref, 42)
+  const text = waitTool.output.render({ condition: 'control', name: 'Save' }, r)[0].text
+  assert.match(text, /^wait control "Save" -> ok in \d+ms polls=3 ref=42 Button "Save"$/)
+})
+
+await test('wait tool reports a timeout instead of throwing', async () => {
+  const bridge = fakeBridge({ 'uia.find': () => ({ matches: [], count: 0 }) })
+  setWaitDeps({ call: bridge.call, config: () => config })
+  const r = await waitTool.execute(
+    { condition: 'control', name: 'Never', pollMs: 50, timeoutMs: 200 },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(r.satisfied, false)
+  assert.ok(r.waitedMs >= 150, `waitedMs=${r.waitedMs}`)
+  assert.ok(r.polls >= 2, `polls=${r.polls}`)
+  assert.match(waitTool.output.render({ condition: 'control', name: 'Never' }, r)[0].text, /timeout/)
+})
+
+await test('wait tool treats a vanished window as satisfied when absent', async () => {
+  const bridge = fakeBridge({
+    'uia.find': () => {
+      const error = new Error('no UIA element for that handle')
+      error.code = 'HWND_NOT_FOUND'
+      throw error
+    },
+  })
+  setWaitDeps({ call: bridge.call, config: () => config })
+  const r = await waitTool.execute(
+    { condition: 'control', handle: 99, name: 'x', absent: true, pollMs: 50, timeoutMs: 1000 },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(r.satisfied, true, 'a window that is gone satisfies an absent wait')
+  assert.equal(r.polls, 1, 'no need to poll again once the condition holds')
+})
+
+await test('wait tool matches a window title case-insensitively', async () => {
+  let polls = 0
+  const bridge = fakeBridge({
+    'window.list': () => {
+      polls += 1
+      return polls < 2 ? { count: 0, windows: [] } : { count: 1, windows: [{ handle: 777, title: 'Save As - Notepad' }] }
+    },
+  })
+  setWaitDeps({ call: bridge.call, config: () => config })
+  const r = await waitTool.execute(
+    { condition: 'window', title: 'save as', pollMs: 50, timeoutMs: 2000 },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(r.satisfied, true)
+  assert.equal(r.window.handle, 777)
+})
+
+await test('wait tool validates its conditions', async () => {
+  const bridge = fakeBridge({ 'uia.find': () => ({ matches: [] }) })
+  setWaitDeps({ call: bridge.call, config: () => config })
+  const exec = { signal: new AbortController().signal }
+  await assert.rejects(() => waitTool.execute({ condition: 'nonsense' }, exec), /condition must be/)
+  await assert.rejects(() => waitTool.execute({ condition: 'control' }, exec), /requires one of name/)
+  await assert.rejects(() => waitTool.execute({ condition: 'window' }, exec), /requires a title/)
+})
+
+await test('wait tool stops on the abort signal', async () => {
+  const bridge = fakeBridge({ 'uia.find': () => ({ matches: [], count: 0 }) })
+  setWaitDeps({ call: bridge.call, config: () => config })
+  const controller = new AbortController()
+  const pending = waitTool.execute(
+    { condition: 'control', name: 'x', pollMs: 50, timeoutMs: 5000 },
+    { signal: controller.signal },
+  )
+  setTimeout(() => controller.abort(), 120)
+  await assert.rejects(() => pending, /cancelled/)
+})
+
+for (const set of [setScreenshotDeps, setInputDeps, setWindowDeps, setUiDeps, setWaitDeps]) set(undefined)
 
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} passed`)
