@@ -1,11 +1,27 @@
 import type { ToolDeps } from '../types.js'
 import { clampInt } from './screenshot.js'
+import { renderWindows } from './format.js'
 
 /**
  * Window management and clipboard tools: enumerate, focus, resize, launch,
  * plus clipboard get/set. Window handles (hwnd) are the stable currency
  * between computer_window, computer_screenshot (target=window) and computer_ui.
  */
+
+/**
+ * Chromium browsers hide their page from UI Automation until renderer
+ * accessibility is switched on, which is the difference between "the agent can
+ * read and click real controls" and "the agent sees nothing but empty panes".
+ * The flag is added here rather than demanded from the caller so the common
+ * case just works; `computer-use.browserUiaFlags` turns it off.
+ */
+const CHROMIUM_BROWSERS = new Set(['chrome.exe', 'msedge.exe', 'brave.exe', 'chromium.exe', 'vivaldi.exe'])
+const A11Y_FLAG = '--force-renderer-accessibility'
+
+function isChromiumBrowser(command: string): boolean {
+  const base = command.split(/[\\/]/).pop()?.toLowerCase() ?? ''
+  return CHROMIUM_BROWSERS.has(base)
+}
 
 export const windowTool = {
   name: 'computer_window',
@@ -19,8 +35,9 @@ export const windowTool = {
     command: { type: 'string', description: "Executable or shell command to launch (action='launch')." },
     args: { type: 'array', description: "Launch arguments (action='launch')." },
     cwd: { type: 'string', description: "Working directory (action='launch')." },
+    detail: { type: 'string', description: "'compact' (default: 'hwnd pid [min,fg] title' per line) or 'full' (raw JSON incl. className/rect)." },
   },
-  output: { schema: { type: 'object' }, render: (_a: unknown, v: unknown) => [{ type: 'text', text: compact(v) }] },
+  output: { schema: { type: 'object' }, render: (a: unknown, v: unknown) => [{ type: 'text', text: renderWindows(a, v) }] },
   timeoutMs: 30_000,
   isConcurrencySafe: (args: unknown) => (args as { action?: string })?.action === 'list',
   async execute(args: Record<string, unknown>) {
@@ -64,8 +81,13 @@ export const windowTool = {
         const command = typeof args.command === 'string' ? args.command.trim() : ''
         if (!command) throw new Error('launch requires command')
         const launchArgs = Array.isArray(args.args) ? args.args.map(String) : []
+        // A Chromium browser started without renderer accessibility publishes no
+        // page content to UIA; add the flag unless the caller already decided.
+        if (cfg.browserUiaFlags && isChromiumBrowser(command) && !launchArgs.includes(A11Y_FLAG)) {
+          launchArgs.push(A11Y_FLAG)
+        }
         const cwd = typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd : undefined
-        return { action, ...(await deps.call('window.launch', { command, args: launchArgs, cwd })) }
+        return { action, launchArgs, ...(await deps.call('window.launch', { command, args: launchArgs, cwd })) }
       }
       default:
         throw new Error(`unknown window action '${action}'`)

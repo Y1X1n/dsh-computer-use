@@ -301,6 +301,35 @@ try {
     assert.equal(r.originY, 10)
   })
 
+  await test('overlay: show / state / hide round-trip', async () => {
+    const shown = await client.call('overlay.show', { text: 'Deepseek Harness托管中' })
+    assert.equal(shown.shown, true)
+    assert.equal(shown.text, 'Deepseek Harness托管中')
+    assert.equal(shown.width, 320)
+    const state = await client.call('overlay.state')
+    assert.equal(state.shown, true)
+    const hidden = await client.call('overlay.hide')
+    assert.equal(hidden.shown, false)
+    const after = await client.call('overlay.state')
+    assert.equal(after.shown, false)
+  })
+
+  await test('screen.capture: budgets bound both bytes and pixels', async () => {
+    // Deliberately oversized request: the bridge must trade quality (floored at
+    // 40) and then edges until both budgets are met.
+    const r = await client.call('screen.capture', {
+      format: 'jpeg',
+      maxEdge: 2560,
+      quality: 90,
+      budgetKb: 190,
+      budgetPixels: 900_000,
+    })
+    assert.ok(r.width * r.height <= 900_000, `pixels ${r.width}x${r.height} exceed the budget`)
+    assert.ok(r.base64Bytes <= 190 * 1024, `base64 ${r.base64Bytes} exceeds the budget`)
+    assert.ok(r.quality >= 40, `quality ${r.quality} fell below the floor`)
+    assert.ok(r.bytes > 0 && r.path.endsWith('.jpg'))
+  })
+
   await test('screen.capture: bad monitor index -> INVALID_ARGS', async () => {
     await expectCallError(client.call('screen.capture', { monitor: 9 }), 'INVALID_ARGS')
   })

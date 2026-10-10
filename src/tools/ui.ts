@@ -1,5 +1,6 @@
 import type { ToolDeps } from '../types.js'
 import { clampInt } from './screenshot.js'
+import { renderUi } from './format.js'
 
 /**
  * UI Automation tools. This is the accessibility-first path: reading a control
@@ -27,8 +28,9 @@ export const uiTool = {
     value: { type: 'string', description: "New value (action='set_value')." },
     maxDepth: { type: 'integer', description: "Tree depth cap (action='tree'). Default from settings." },
     maxNodes: { type: 'integer', description: 'Node cap; response is truncated beyond it.' },
+    detail: { type: 'string', description: "'compact' (default: one line per control) or 'full' (raw JSON with rects/class names)." },
   },
-  output: { schema: { type: 'object' }, render: (_a: unknown, v: unknown) => [{ type: 'text', text: compact(v) }] },
+  output: { schema: { type: 'object' }, render: (a: unknown, v: unknown) => [{ type: 'text', text: renderUi(a, v) }] },
   timeoutMs: 45_000,
   isConcurrencySafe: (args: unknown) => (args as { action?: string })?.action === 'tree',
   async execute(args: Record<string, unknown>) {
@@ -82,10 +84,6 @@ export const uiTool = {
     }
     throw new Error(`unknown ui action '${action}'; expected one of: ${UIA_ACTIONS}`)
   },
-}
-
-function compact(value: unknown): string {
-  try { return JSON.stringify(value) } catch { return String(value) }
 }
 
 export let currentDeps: ToolDeps | undefined

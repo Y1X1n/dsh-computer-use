@@ -1,6 +1,7 @@
 import type {
   ToolDefinition,
 } from '@deepseek-ai/dsh-tools'
+import type { ComputerUseConfig } from './config.js'
 
 /**
  * Narrow view of the services this plugin reads off the cordis context.
@@ -34,17 +35,7 @@ export type AnyTool = ToolDefinition
 /** A tool factory receives resolved config and the shared bridge accessor. */
 export interface ToolDeps {
   call<T = Record<string, unknown>>(op: string, args?: Record<string, unknown>, opts?: { timeoutMs?: number }): Promise<T>
-  config(): Readonly<{
-    enabled: boolean
-    screenshotMaxEdge: number
-    screenshotQuality: number
-    uiaMaxNodes: number
-    uiaMaxDepth: number
-    windowLimit: number
-    bridgeTimeoutMs: number
-    captureDir: string
-    captureBackend: string
-  }>
+  config(): Readonly<ComputerUseConfig>
   /** Resolved lazily by the entry; may be undefined when no attachment store is mounted. */
   deps?: never
 }
