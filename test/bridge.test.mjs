@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict'
 import { execSync, execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 
@@ -101,6 +101,27 @@ try {
     assert.ok(r.version, 'version missing')
     assert.ok(r.os && String(r.os).includes('Windows'), `os looks wrong: ${r.os}`)
     assert.ok(r.dpi > 0, `dpi looks wrong: ${r.dpi}`)
+  })
+
+  await test('engine cache: a compiled engine is reused instead of recompiled', async () => {
+    // The C# engine is compiled once per Engine.cs revision into a cache DLL
+    // keyed by the source hash; a second bridge must load it, not rebuild it.
+    const cacheDir = join(process.env.LOCALAPPDATA ?? '', 'dsh-computer-use', 'engine-cache')
+    assert.ok(existsSync(cacheDir), `no engine cache directory at ${cacheDir}`)
+    const dlls = readdirSync(cacheDir).filter((name) => name.endsWith('.dll'))
+    assert.ok(dlls.length > 0, `no cached engine assembly in ${cacheDir}`)
+    const dll = join(cacheDir, dlls[0])
+    const before = statSync(dll).mtimeMs
+    const temp = createBridgeClient({ scriptPath, timeoutMs: 30_000 })
+    try {
+      const started = Date.now()
+      const r = await temp.call('ping')
+      assert.equal(r.platform, 'win32')
+      console.log(`       (cached bridge start: ${Date.now() - started}ms)`)
+    } finally {
+      await temp.dispose()
+    }
+    assert.equal(statSync(dll).mtimeMs, before, 'a cache hit must not rewrite the assembly')
   })
 
   await test('unknown op -> UNKNOWN_OP, bridge survives', async () => {

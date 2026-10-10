@@ -48,6 +48,50 @@ function To-JsonLine {
 # emitted before this so the client never waits on the compiler).
 # ---------------------------------------------------------------------------
 
+function Test-EngineLoaded {
+  try {
+    $null = [DshComputerUse.Engine]
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Complete-Compile {
+  # Records the freshly available engine in this session. Returns $false when the
+  # types are still not resolvable, so callers can fall back instead of guessing.
+  if (-not (Test-EngineLoaded)) { return $false }
+  $script:BridgeErrorType = [DshComputerUse.BridgeException]
+  $script:Compiled = $true
+  return $true
+}
+
+function Get-EngineCacheDir {
+  $root = $env:LOCALAPPDATA
+  if (-not $root) { $root = [System.IO.Path]::GetTempPath() }
+  $dir = Join-Path $root 'dsh-computer-use\engine-cache'
+  if (-not (Test-Path -LiteralPath $dir)) {
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  }
+  return $dir
+}
+
+function Get-EngineCachePath {
+  param([string]$Source)
+  # The key covers everything that can change the emitted IL: the source itself,
+  # the PowerShell/CLR pair that drives the legacy compiler, and a scheme version
+  # so an older layout can never be mistaken for a valid build.
+  $material = $Source + "`n|scheme=1|ps=" + $PSVersionTable.PSVersion.ToString() + "|clr=" + [Environment]::Version.ToString()
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($material)
+    $hash = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $sha.Dispose()
+  }
+  return (Join-Path (Get-EngineCacheDir) ('engine-' + $hash.Substring(0, 32) + '.dll'))
+}
+
 function Ensure-Compiled {
   if ($script:Compiled) { return }
   if ($script:CompileError) {
@@ -55,24 +99,64 @@ function Ensure-Compiled {
     # compiler on every request.
     throw $script:CompileError
   }
+
   $sourcePath = Join-Path $PSScriptRoot 'Engine.cs'
   $source = [System.IO.File]::ReadAllText($sourcePath)
-  try {
-    Add-Type -TypeDefinition $source -ReferencedAssemblies @(
-      'System.Drawing',
-      'System.Windows.Forms',
-      'UIAutomationClient',
-      'UIAutomationTypes',
-      'WindowsBase'
-    )
-  } catch {
-    $script:CompileError = $_.Exception
-    throw
+  $refs = @(
+    'System.Drawing',
+    'System.Windows.Forms',
+    'UIAutomationClient',
+    'UIAutomationTypes',
+    'WindowsBase'
+  )
+
+  # Compiling C# costs ~0.9s per cold start. Keep the assembly next to the user's
+  # cache so a cold bridge only pays that once per Engine.cs revision — borrowed
+  # from Yu-tao-Li/dsh-computer-use-win (see docs/borrow-mit-projects.md).
+  $cachePath = $null
+  try { $cachePath = Get-EngineCachePath -Source $source } catch { $cachePath = $null }
+
+  if ($cachePath -and (Test-Path -LiteralPath $cachePath)) {
+    try {
+      Add-Type -Path $cachePath
+      if (Complete-Compile) { return }
+    } catch { }
+    # Unusable entry (truncated, corrupt, half-copied): drop it and rebuild.
+    try { Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue } catch { }
   }
-  # Keep the error type as an instance (no literal type reference here, so a
-  # failed compile can never turn into an unresolvable-type crash loop).
-  $script:BridgeErrorType = [DshComputerUse.BridgeException]
-  $script:Compiled = $true
+
+  if ($cachePath) {
+    $tmp = $cachePath + '.' + [Guid]::NewGuid().ToString('n') + '.tmp'
+    try {
+      Add-Type -TypeDefinition $source -ReferencedAssemblies $refs -OutputAssembly $tmp
+      Move-Item -LiteralPath $tmp -Destination $cachePath -Force
+      if (Complete-Compile) { return }
+    } catch {
+      try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+      # A concurrent bridge may have won the race and published its own copy.
+      if (Test-Path -LiteralPath $cachePath) {
+        try {
+          Add-Type -Path $cachePath
+          if (Complete-Compile) { return }
+        } catch { }
+      }
+    }
+  }
+
+  # Last resort: compile into memory. A read-only or unavailable cache directory
+  # must never break the bridge, it may only cost the original compile time.
+  try {
+    Add-Type -TypeDefinition $source -ReferencedAssemblies $refs
+  } catch {
+    if (-not (Test-EngineLoaded)) {
+      $script:CompileError = $_.Exception
+      throw
+    }
+  }
+  if (-not (Complete-Compile)) {
+    $script:CompileError = (New-Object System.Exception 'engine types failed to load')
+    throw $script:CompileError
+  }
 }
 
 # ---------------------------------------------------------------------------

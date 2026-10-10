@@ -58,7 +58,7 @@
 - 未识别 op：`{"ok":false,"error":{"code":"UNKNOWN_OP","message":...}}`，**进程不得退出**。
 - 启动握手：进程就绪后先输出一行 `{"ready":true,"version":"1.0.0","platform":"win32"}`（无 id）。
 - 异常必须捕获并以 ok:false 返回；stdin 关闭时干净退出。
-- 每个响应后立即 Flush；进程常驻，Add-Type 只做一次。
+- 每个响应后立即 Flush；进程常驻，Add-Type 只在首个 op 做一次——且**只在 Engine.cs 有新版本时**：编译产物按 `sha256(源码 + PS/CLR 版本 + 方案版本)` 缓存到 `%LOCALAPPDATA%\dsh-computer-use\engine-cache\engine-<hash>.dll`，命中即 `Add-Type -Path`（实测进程就绪 185ms、首次 op 258ms、后续 op 1–2ms）。缓存目录不可写或 DLL 损坏时**自动回落**到内存编译，绝不因为缓存问题弄坏桥。
 
 ### 2.2 op 清单
 
@@ -221,7 +221,7 @@ client.dispose()   // 结束子进程，幂等
 | uia.tree diff | compact 树已实现（−78%），diff 未做 | compact 树 + "模型见过的树"基线 diff（ZCode tree_shown_to_model 语义） |
 | actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引（Anionex 用「观察令牌 + 过期拒绝」实现，见借鉴清单） |
 | 物理 Esc 中断 | 未做 | 低级钩子区分物理/注入输入（`LLKHF_INJECTED`），抑制窗口超时 **fail-open**；⚠️ 需要真实物理输入才能验收，不适合只靠 CI |
-| 冷启动 | 插件加载时预热 ping（省去首次调用等 Add-Type 编译 ~0.9s） | Add-Type 产物按 hash 落盘缓存（同行已实现），进一步降到 <250ms |
+| 冷启动 | ✅ 插件加载预热 ping + **引擎汇编按源码 hash 缓存**（`%LOCALAPPDATA%\dsh-computer-use\engine-cache`）：冷启动 1090ms → **258ms**，第二次 ping 1–2ms | 若还要更快只剩换宿主（PS 进程本身占 185ms） |
 | UIA 寻址 | 自增整数 ref，窗口消失即失效 | 改用 UIA RuntimeId（刷新后稳定），并暴露 ControlView 视图省 token |
 | 多会话租约 | 无 | §6.4，接 MCP 前置条件 |
 | 窗口还原副作用 | PrintWindow 规避 | 保持默认；若引入 WGC 后端（Windows.Graphics.Capture via WinRT），可后台截最小化窗口且零焦点干扰 |

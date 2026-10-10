@@ -57,11 +57,11 @@
 
 | 借鉴内容 | 来源 | 落点 |
 |---|---|---|
-| 截图前隐藏指示器（`suspend_for_capture`） | Windows-MCP | `bridge/Engine.cs` `Overlay.SuspendForCapture` + `ScreenCapture` |
-| 输入账本 / 关机释放 / 拒绝重复按下 | Windows-MCP | `bridge/Engine.cs` `InputLedger` + `Engine.Shutdown()` + `computer-bridge.ps1` |
+| 截图前隐藏指示器（`suspend_for_capture`） | Windows-MCP | ✅ `bridge/Engine.cs` `Overlay.SuspendForCapture` + `ScreenCapture` |
+| 输入账本 / 关机释放 / 拒绝重复按下 | Windows-MCP | ✅ `bridge/Engine.cs` `InputLedger` + `Engine.Shutdown()` + `computer-bridge.ps1` |
+| 缓存编译产物（Add-Type → DLL） | Yu-tao-Li-win | ✅ `bridge/computer-bridge.ps1` `Ensure-Compiled`：按源码 hash 编译到 `%LOCALAPPDATA%\dsh-computer-use\engine-cache`，实测冷启动 1090ms → 258ms |
 | 指示器 generation 与健康门控 | Windows-MCP | 待办：`Overlay.change(generation)` |
 | 物理接管检测 + fail-open | Windows-MCP | 待办（需真实物理输入验证） |
-| 缓存编译产物（Add-Type → DLL） | Yu-tao-Li-win | 待办：`computer-bridge.ps1` |
 | UIA ControlView + RuntimeId 寻址 | Yu-tao-Li-win / FlaUI | 待办：`Engine.cs` `uia.tree` / ref 注册表 |
 | 观察令牌 + 过期拒绝 + diff | Anionex | 待办（对应 `docs/DEVELOPMENT.md` §7 的 `actionSent`） |
 | `computer_wait` 有界轮询 | Anionex | 待办 |
