@@ -375,7 +375,16 @@ try {
       'Add-Type -MemberDefinition \'[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int v);\' ' +
       '-Name KeyState -Namespace DshProbe; [DshProbe.KeyState]::GetAsyncKeyState(0x10)'
     const raw = execFileSync('powershell', ['-NoProfile', '-Command', probe], { encoding: 'utf8', timeout: 30_000 }).trim()
-    assert.equal(raw, '0', `shift must not be held after the bridge exits (GetAsyncKeyState=${raw})`)
+    const value = Number.parseInt(raw, 10)
+    assert.ok(Number.isFinite(value), `unexpected GetAsyncKeyState output: ${raw}`)
+    // Only the high bit means "currently down"; the low bit merely says the key
+    // was pressed at some point since the previous query, which a correct
+    // press-then-release also produces.
+    assert.equal(
+      value & 0x8000,
+      0,
+      `shift must not be held after the bridge exits (GetAsyncKeyState=${raw})`,
+    )
   })
 
   await test('screen.capture: budgets bound both bytes and pixels', async () => {
