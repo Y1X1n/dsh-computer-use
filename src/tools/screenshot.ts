@@ -91,6 +91,7 @@ async function runScreenshot(args: Record<string, unknown>, signal: AbortSignal)
     height?: number
     bytes?: number
     format?: string
+    overlaySuspended?: boolean
   }
 
   return {
@@ -101,6 +102,8 @@ async function runScreenshot(args: Record<string, unknown>, signal: AbortSignal)
     bytes: result.bytes ?? 0,
     format: result.format ?? 'jpeg',
     target,
+    /** The bridge hid the hosting strip for this capture so it stays out of the frame. */
+    overlaySuspended: result.overlaySuspended === true,
   }
 }
 

@@ -8,7 +8,7 @@
  * which cannot strip TS types); locally Node 24 falls back to ../src.
  */
 import assert from 'node:assert/strict'
-import { execSync } from 'node:child_process'
+import { execSync, execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -25,7 +25,33 @@ const launchedPids = []
 let client
 let launchedHandle = 0
 
+/**
+ * `--safe` skips the cases that need an idle desktop: they move the real mouse,
+ * click, type into the foreground window or drag a window, so running them while
+ * somebody is working (or playing) hijacks their input. Everything else — the
+ * wire protocol, captures, UIA reads, the overlay and the input ledger — still
+ * runs, which is what a shared machine or a quick local check needs.
+ * CI runs the full suite on a clean runner.
+ */
+const SAFE = process.argv.includes('--safe')
+const NEEDS_FOREGROUND = new Set([
+  'window.focus: focus the launched window',
+  'mouse.move: cursor lands on target (physical pixels)',
+  'mouse.click + focus: clicks into the text editor',
+  'keyboard.type: unicode text lands in the focused editor',
+  'keyboard.press: ctrl combo works (copy nothing, no crash)',
+  'uia.find + uia.invoke: focus a control by type',
+  'mouse.scroll: returns cursor position',
+  'mouse.drag: drags a window by its title bar',
+  'window.state: minimize then restore the window',
+])
+
 function test(name, fn) {
+  if (SAFE && NEEDS_FOREGROUND.has(name)) {
+    results.push({ name, ok: true, skipped: true })
+    console.log(`  skip ${name} (--safe: needs an idle desktop)`)
+    return Promise.resolve()
+  }
   return (async () => {
     const started = Date.now()
     try {
@@ -314,6 +340,53 @@ try {
     assert.equal(after.shown, false)
   })
 
+  await test('overlay: a capture hides the strip and restores it afterwards', async () => {
+    await client.call('overlay.show', {})
+    const shot = await client.call('screen.capture', { format: 'jpeg', maxEdge: 640, quality: 60 })
+    assert.equal(shot.overlaySuspended, true, 'the capture must report the strip was hidden')
+    const state = await client.call('control.state')
+    assert.equal(state.overlaySuspended, false, 'the strip must be back after the capture')
+    assert.equal(state.overlayVisible, true)
+    await client.call('overlay.hide')
+  })
+
+  await test('input ledger: held keys are tracked, duplicates rejected, up clears', async () => {
+    const start = await client.call('control.state')
+    assert.deepEqual(start.heldKeys, [], 'no key should be held at rest')
+    await client.call('keyboard.press', { keys: ['shift'], action: 'down' })
+    assert.deepEqual((await client.call('control.state')).heldKeys, ['shift'])
+    await expectCallError(client.call('keyboard.press', { keys: ['shift'], action: 'down' }), 'INPUT_HELD')
+    await client.call('keyboard.press', { keys: ['shift'], action: 'up' })
+    assert.deepEqual((await client.call('control.state')).heldKeys, [], 'up must clear the hold')
+  })
+
+  await test('input ledger: a held key is released when the bridge exits', async () => {
+    // The bug this guards: a caller that dies between keyboard.press down and up
+    // would leave the modifier physically held on the user's keyboard.
+    const temp = createBridgeClient({ scriptPath, timeoutMs: 30_000 })
+    try {
+      await temp.call('keyboard.press', { keys: ['shift'], action: 'down' })
+      assert.deepEqual((await temp.call('control.state')).heldKeys, ['shift'])
+    } finally {
+      await temp.dispose()
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const probe =
+      'Add-Type -MemberDefinition \'[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int v);\' ' +
+      '-Name KeyState -Namespace DshProbe; [DshProbe.KeyState]::GetAsyncKeyState(0x10)'
+    const raw = execFileSync('powershell', ['-NoProfile', '-Command', probe], { encoding: 'utf8', timeout: 30_000 }).trim()
+    const value = Number.parseInt(raw, 10)
+    assert.ok(Number.isFinite(value), `unexpected GetAsyncKeyState output: ${raw}`)
+    // Only the high bit means "currently down"; the low bit merely says the key
+    // was pressed at some point since the previous query, which a correct
+    // press-then-release also produces.
+    assert.equal(
+      value & 0x8000,
+      0,
+      `shift must not be held after the bridge exits (GetAsyncKeyState=${raw})`,
+    )
+  })
+
   await test('screen.capture: budgets bound both bytes and pixels', async () => {
     // Deliberately oversized request: the bridge must trade quality (floored at
     // 40) and then edges until both budgets are met.
@@ -365,7 +438,8 @@ try {
 }
 
 const failed = results.filter((r) => !r.ok)
-console.log(`\n${results.length - failed.length}/${results.length} passed`)
+const skipped = results.filter((r) => r.skipped).length
+console.log(`\n${results.length - failed.length}/${results.length} passed${skipped ? ` (${skipped} skipped by --safe)` : ''}`)
 if (failed.length > 0) {
   for (const f of failed) console.log(`  - ${f.name}: ${f.error}`)
   process.exit(1)

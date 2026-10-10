@@ -244,6 +244,13 @@ await test('screenshot tool forwards both capture budgets', async () => {
   assert.equal(bridge.calls[0].args.budgetPixels, 900_000)
 })
 
+await test('screenshot tool reports whether the strip was hidden for the capture', async () => {
+  const bridge = fakeBridge({ 'screen.capture': () => ({ path: 'x', overlaySuspended: true }) })
+  setScreenshotDeps({ call: bridge.call, config: () => config })
+  const r = await screenshotTool.execute({ target: 'screen' }, { signal: new AbortController().signal })
+  assert.equal(r.overlaySuspended, true)
+})
+
 for (const set of [setScreenshotDeps, setInputDeps, setWindowDeps, setUiDeps]) set(undefined)
 
 const failed = results.filter((r) => !r.ok)

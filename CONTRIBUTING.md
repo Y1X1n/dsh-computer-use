@@ -72,6 +72,16 @@ npm run build       # scripts/build.mjs
 npm test            # node test/bridge.test.mjs && node test/tools.test.mjs（Windows 真实环境）
 ```
 
+套件里有一部分用例需要**空闲桌面**（真的移动鼠标、点击、向前台窗口打字、拖窗口）。
+在有人正在使用这台机器时，用安全档跑其余部分，别抢别人的输入：
+
+```powershell
+node test/bridge.test.mjs --safe   # 跳过 9 个需要前台空闲的用例，其余照跑
+node test/tools.test.mjs
+```
+
+CI 在干净的 runner 上跑完整套件，所以合并前的 `--safe` 只是本地快速自查，不能替代 CI。
+
 ## 禁止事项
 
 - ❌ 直接 push 到 `main` / `master`（pre-push 钩子会拒绝；见下）

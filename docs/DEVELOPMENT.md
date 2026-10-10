@@ -85,10 +85,13 @@
 | overlay.show | {text?} | {shown, text, width, height} |
 | overlay.hide | {} | {shown:false} |
 | overlay.state | {} | {shown, width, height, defaultText} |
+| control.state | {} | {heldKeys:[], overlayVisible, overlaySuspended} |
 
-> `screen.capture` 的 `budgetKb`（base64 字节）与 `budgetPixels`（宽×高）是**硬预算**：超限时先按步长 15 降质（下限 40），再按 ×0.8 缩边（下限 320），像素预算先一步精确适配。返回值里的 `quality`/`base64Bytes` 是**实际写入**的值。
+> `screen.capture` 的 `budgetKb`（base64 字节）与 `budgetPixels`（宽×高）是**硬预算**：超限时先按步长 15 降质（下限 40），再按 ×0.8 缩边（下限 320），像素预算先一步精确适配。返回值里的 `quality`/`base64Bytes` 是**实际写入**的值；`overlaySuspended` 表示这次截图前把托管条藏起来了。
 >
-> `overlay.*` 由插件生命周期驱动（首次工具调用 show、插件卸载/空闲 hide），也可手动调用；窗口是分层置顶椭圆条，`WS_EX_TRANSPARENT|WS_EX_NOACTIVATE` 保证鼠标穿透且不抢焦点，桥进程退出即消失。
+> `overlay.*` 由插件生命周期驱动（首次工具调用 show、插件卸载/空闲 hide），也可手动调用；窗口是分层置顶椭圆条，`WS_EX_TRANSPARENT|WS_EX_NOACTIVATE` 保证鼠标穿透且不抢焦点，桥进程退出即消失。截图期间会自动 `SuspendForCapture()` 隐藏、截完恢复——否则 agent 会把自己的指示条截进观察结果。
+>
+> `keyboard.press action:'down'` 进入**输入账本**：重复按下同一键报 `INPUT_HELD`，`action:'up'` 清除；桥进程退出时 `Engine.Shutdown()` 释放所有仍按住的键，绝不让按键留在用户键盘上。`control.state` 用于查看当前账本与指示条状态。
 
 ### 2.3 Node 侧客户端（src/bridge/client.ts）
 
@@ -157,6 +160,8 @@ client.dispose()   // 结束子进程，幂等
 3. **进程边界**：桥只接受 NDJSON 请求，无 shell 插值；`window.launch` 是唯一会拉起新进程的 op，参数显式 `command/args/cwd`（不走 shell 字符串拼接）。
 4. **焦点礼貌**：除 window.focus / window.launch 外无任何前台抢占；截图默认 PrintWindow（后台可截，不抢焦点）。
 5. **托管可见**：agent 一旦开始操作，屏幕顶部出现黑底白字椭圆条「Deepseek Harness托管中」（`overlay.show`），鼠标穿透、不抢焦点、不进 Alt-Tab；插件卸载/总开关关闭/空闲超时即消失，桥进程退出时窗口随进程一起消失。文案与开关见 `computer-use.overlay*`。
+6. **观察不被污染**：截图前 `Overlay.SuspendForCapture()` 把托管条藏起来（默认 70ms 让合成器跟上），截完恢复——否则 agent 会把自己的指示条截进画面，既浪费顶部像素也让模型误判。返回值 `overlaySuspended` 报告这次是否藏过。
+7. **不留残留输入**：`keyboard.press action:'down'` 记入输入账本，重复按下报 `INPUT_HELD`；桥进程退出时 `Engine.Shutdown()` 释放所有仍按住的键。这条防的是"调用方死在 down 与 up 之间，用户的 Shift/Ctrl 被永久按住"（机制借鉴 Windows-MCP `control_ledger.py`，见 [borrow-mit-projects.md](./borrow-mit-projects.md)）。
 
 二期候选（对照调研 §5）：
 
@@ -201,18 +206,22 @@ client.dispose()   // 结束子进程，幂等
 
 ### 6.5 版本与发布
 
-- `npm run typecheck && npm run build && npm test`（test 含真实桥冒烟：ping/screen.list/window.list/mouse.move/keyboard.type/uia.tree）。
+- `npm run typecheck && npm run build && npm test`（test 含真实桥冒烟：ping/screen.list/window.list/mouse.move/keyboard.type/uia.tree）。有人正在用这台机器时用 `node test/bridge.test.mjs --safe` 跳过 9 个需要前台空闲的用例（见 [CONTRIBUTING.md](../CONTRIBUTING.md#本地校验)）。
 - 所有 commit 走 PR（见 [PR-WORKFLOW.md](./PR-WORKFLOW.md)，任务板 task-3）。
 - 桥脚本随 npm 包 `files` 里的 `bridge/` 分发，版本号与插件同版本（当前桥握手 version 固定 1.0.0，协议变更时同步 task-1 契约）。
+- 借鉴第三方（尤其 MIT）机制时，同步登记到 [borrow-mit-projects.md](./borrow-mit-projects.md)，并在 commit message 里注明来源仓库。
 
 ## 7. 已知限制与路线图
 
 | 项 | 现状 | 方向 |
 |---|---|---|
-| 截图预算 | ✅ 已实现（像素+字节双预算，实测 874 token/张） | 按需微调默认值 |
+| 截图预算 | ✅ 已实现（像素+字节双预算，实测 1200 token/张） | 按需微调默认值 |
+| 观察污染 | ✅ 截图前自动隐藏托管条（`overlaySuspended` 回报） | — |
+| 残留输入 | ✅ 输入账本 + 退出释放（`INPUT_HELD` / `Shutdown()`） | — |
 | uia.tree diff | compact 树已实现（−78%），diff 未做 | compact 树 + "模型见过的树"基线 diff（ZCode tree_shown_to_model 语义） |
-| actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引 |
-| 悬浮条/Esc | 悬浮条 ✅ 已实现（顶部椭圆，穿透置顶）；Esc 中断未做 | §5 二期候选（物理 Esc） |
-| 冷启动 | 插件加载时预热 ping（省去首次调用等 Add-Type 编译 ~0.9s） | Add-Type 产物落盘缓存，进一步降到 <250ms |
+| actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引（Anionex 用「观察令牌 + 过期拒绝」实现，见借鉴清单） |
+| 物理 Esc 中断 | 未做 | 低级钩子区分物理/注入输入（`LLKHF_INJECTED`），抑制窗口超时 **fail-open**；⚠️ 需要真实物理输入才能验收，不适合只靠 CI |
+| 冷启动 | 插件加载时预热 ping（省去首次调用等 Add-Type 编译 ~0.9s） | Add-Type 产物按 hash 落盘缓存（同行已实现），进一步降到 <250ms |
+| UIA 寻址 | 自增整数 ref，窗口消失即失效 | 改用 UIA RuntimeId（刷新后稳定），并暴露 ControlView 视图省 token |
 | 多会话租约 | 无 | §6.4，接 MCP 前置条件 |
 | 窗口还原副作用 | PrintWindow 规避 | 保持默认；若引入 WGC 后端（Windows.Graphics.Capture via WinRT），可后台截最小化窗口且零焦点干扰 |

@@ -198,4 +198,13 @@ while ($true) {
     })
   }
 }
+
+# Teardown: nothing this bridge injected may outlive it. A key still held down
+# (a caller that died between keyboard.press down and up) would otherwise stay
+# held on the user's keyboard, and the hosting strip would linger on screen.
+try {
+  if ($script:Compiled) { [DshComputerUse.Engine]::Shutdown() }
+} catch {
+  # Shutdown is best-effort; the process is going away regardless.
+}
 exit 0
