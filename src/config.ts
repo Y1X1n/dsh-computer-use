@@ -36,6 +36,10 @@ export interface ComputerUseConfig {
   overlayText: string
   /** Hide the overlay after this many ms without a tool call (0 = never). */
   overlayIdleHideMs: number
+  /** Default give-up time for computer_wait (ms). */
+  waitTimeoutMs: number
+  /** Default poll interval for computer_wait (ms). */
+  waitPollMs: number
 }
 
 export const NS = 'computer-use'
@@ -58,6 +62,8 @@ export const ConfigSchema: Schema<ComputerUseConfig> = Schema.object({
   overlay: Schema.boolean().default(true).description('托管时在屏幕顶部显示状态悬浮条(黑底白字,鼠标穿透)'),
   overlayText: Schema.string().default('Deepseek Harness托管中').description('悬浮条文案'),
   overlayIdleHideMs: Schema.number().min(0).max(3600000).default(180000).description('多久没有工具调用后自动隐藏悬浮条(ms),0 表示不自动隐藏'),
+  waitTimeoutMs: Schema.number().min(100).max(30000).default(5000).description('computer_wait 默认放弃时间(ms)'),
+  waitPollMs: Schema.number().min(50).max(5000).default(250).description('computer_wait 默认轮询间隔(ms)'),
 })
 
 export function normalizeBackend(value: unknown): CaptureBackend {

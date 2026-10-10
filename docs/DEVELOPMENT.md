@@ -113,6 +113,7 @@ client.dispose()   // 结束子进程，幂等
 | computer_window | action(list\|focus\|minimize\|maximize\|restore\|close\|launch), handle?, title?, command?, args?, cwd? | {count, windows[]} / {handle,title} / {pid,handle,title} | window.* |
 | computer_ui | action(tree\|find\|invoke\|set_value\|focus), handle?, name?, automationId?, controlType?, ref?, value?, maxDepth?, maxNodes? | {action, nodes[]\|matches[]\|ref,action,ok} | uia.* |
 | computer_clipboard | action('get'\|'set'), text? | {length, preview?, text?} / {ok, length} | clipboard.* |
+| computer_wait | condition('window'\|'control'), title?, handle?, name?, automationId?, controlType?, absent?, timeoutMs?, pollMs? | {condition, absent, satisfied, waitedMs, polls[, window][, control]} | window.list / uia.find（工具层轮询） |
 
 公共约定：
 

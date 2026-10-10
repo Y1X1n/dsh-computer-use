@@ -9,13 +9,14 @@ import { screenshotTool, setDeps as setScreenshotDeps } from './tools/screenshot
 import { mouseTool, keyboardTool, setDeps as setInputDeps } from './tools/input.js'
 import { windowTool, clipboardTool, setDeps as setWindowDeps } from './tools/windows.js'
 import { uiTool, setDeps as setUiDeps } from './tools/ui.js'
+import { waitTool, setDeps as setWaitDeps } from './tools/wait.js'
 import type { BlockLike, ToolDeps } from './types.js'
 
 export const name = 'dsh-computer-use'
 export const inject: string[] = []
 export { ConfigSchema, NS }
 
-const TOOLS = [screenshotTool, mouseTool, keyboardTool, windowTool, uiTool, clipboardTool]
+const TOOLS = [screenshotTool, mouseTool, keyboardTool, windowTool, uiTool, clipboardTool, waitTool]
 
 /** Directory of the compiled bundle; the PowerShell bridge ships next to it. */
 function bridgeDir(): string {
@@ -109,6 +110,7 @@ export function apply(ctx: Context, config: unknown): void {
   setInputDeps(deps)
   setWindowDeps(deps)
   setUiDeps(deps)
+  setWaitDeps(deps)
 
   lctx.effect?.(() => () => {
     hideOverlay()
@@ -116,6 +118,7 @@ export function apply(ctx: Context, config: unknown): void {
     setInputDeps(undefined)
     setWindowDeps(undefined)
     setUiDeps(undefined)
+    setWaitDeps(undefined)
     void bridge?.dispose().catch(() => undefined)
     bridge = null
   })

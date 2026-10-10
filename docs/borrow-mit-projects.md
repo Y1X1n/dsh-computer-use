@@ -64,7 +64,7 @@
 | 物理接管检测 + fail-open | Windows-MCP | 待办（需真实物理输入验证） |
 | UIA ControlView + RuntimeId 寻址 | Yu-tao-Li-win / FlaUI | ✅ `Engine.cs`：`view` 默认 `control`（实测省 5–46% 字节）、ref 记 RuntimeId 做身份校验、`AutomationElement.FromHandle` 兜底非桌面子窗口 |
 | 观察令牌 + 过期拒绝 + diff | Anionex | 待办（对应 `docs/DEVELOPMENT.md` §7 的 `actionSent`） |
-| `computer_wait` 有界轮询 | Anionex | 待办 |
+| `computer_wait` 有界轮询 | Anionex | ✅ `src/tools/wait.ts`：条件成立/消失的有界轮询，成功即回 hwnd/ref，超时不抛异常；实测 `wait control TabItem -> ok in 75ms polls=1 ref=1` |
 | 交互性打分筛选 + 敏感字段脱敏 | browser-use / FlaUI | ✅ `Engine.cs` `IsWorthShowing`（无名无 pattern 的节点丢弃、祖先保留）+ `IsPassword` 脱敏 + `enabled/offscreen` 标记，渲染成 `[pw]/[dis]/[off]` |
 
 > 已落地项在本文件更新时同步勾掉，并在 commit message 里注明来源仓库。

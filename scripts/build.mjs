@@ -36,6 +36,7 @@ const toolEntries = {
   'lib/tools/input.js': 'src/tools/input.ts',
   'lib/tools/windows.js': 'src/tools/windows.ts',
   'lib/tools/ui.js': 'src/tools/ui.ts',
+  'lib/tools/wait.js': 'src/tools/wait.ts',
   'lib/types.js': 'src/types.ts',
 }
 for (const [outfile, entryPoint] of Object.entries(toolEntries)) {

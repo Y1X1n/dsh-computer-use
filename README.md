@@ -15,6 +15,7 @@ DSH（DeepSeek Harness）本身无法"看到"或"操作"图形界面。本插件
 - **computer_window** — 列出/聚焦/最小化/启动应用
 - **computer_ui** — 读 UI Automation 控件树、按 ref 点击/填值，**不用看图就能精准操作**
 - **computer_clipboard** — 读写剪贴板（大文本搬运用剪贴板+粘贴，不烧 token）
+- **computer_wait** — 有界等待一个窗口/控件条件成立，**替代"读树/截图 + sleep"的轮询**；成功时直接带回匹配到的 hwnd/ref，超时也只是返回 `satisfied:false`
 
 ## 快速开始
 
@@ -44,7 +45,7 @@ npm pack
 | 浏览器可达 | Chromium 启动自动补 `--force-renderer-accessibility`，空树时直接给出修复指引 |
 | 结果裁剪 | 窗口列表/控件树有硬上限（40 行/150 节点），名字截断 |
 | 常驻桥接 | 单个 PowerShell 子进程常驻 + 插件加载预热；C# 引擎按源码 hash 编译一次并缓存成 DLL，冷启动 1090ms → 258ms，后续 op 1–2ms |
-| 静态工具面 | 6 个工具描述固定不变 → prompt cache 稳定，重复请求不重算 |
+| 静态工具面 | 7 个工具描述固定不变 → prompt cache 稳定，重复请求不重算 |
 
 ## 安全模型
 

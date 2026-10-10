@@ -151,6 +151,40 @@ export function renderWindows(args: unknown, value: unknown): string {
   return [`windows: ${v.count ?? rows.length} (hwnd pid [min,fg] title)`, ...lines].join('\n')
 }
 
+/**
+ * A wait is one line: what was watched, whether it happened, how long it took and
+ * what was found — the ref included, so the next call can act without observing
+ * again.
+ */
+export function renderWait(args: unknown, value: unknown): string {
+  if (detailOf(args) === 'full') return compactJson(value)
+  const v = (value ?? {}) as {
+    condition?: string
+    absent?: boolean
+    satisfied?: boolean
+    waitedMs?: number
+    polls?: number
+    window?: { handle?: number; title?: string }
+    control?: { ref?: number; role?: string; name?: string }
+  }
+  const a = (args ?? {}) as { title?: string; name?: string; automationId?: string; controlType?: string }
+  const subject =
+    v.condition === 'window'
+      ? `window "${clip(String(a.title ?? ''), 40)}"`
+      : `control ${[a.controlType, a.name ? `"${clip(a.name, 40)}"` : '', a.automationId ? '#' + a.automationId : '']
+          .filter(Boolean)
+          .join(' ')}`
+  const verdict = v.satisfied ? 'ok' : 'timeout'
+  const bits = [
+    `wait ${v.absent ? 'absent ' : ''}${subject} -> ${verdict} in ${v.waitedMs ?? 0}ms polls=${v.polls ?? 0}`,
+  ]
+  if (v.window?.handle) bits.push(`hwnd=${v.window.handle}`)
+  if (v.control?.ref !== undefined) {
+    bits.push(`ref=${v.control.ref} ${v.control.role ?? ''} "${clip(String(v.control.name ?? ''), 40)}"`)
+  }
+  return bits.join(' ')
+}
+
 export function clip(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) + '…' : text
 }
