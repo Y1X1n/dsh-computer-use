@@ -601,13 +601,29 @@ namespace DshComputerUse
         /// place — borrow from FlaUI/Yu-tao-Li: identity, not just liveness.
         /// </summary>
         private static readonly Dictionary<long, int[]> UiaRuntimeIds = new Dictionary<long, int[]>();
+        /// <summary>
+        /// When each reference was observed. An action is tied to an observation,
+        /// and an observation goes stale: reusing a ref minutes later means acting
+        /// on a picture of the screen that no longer exists.
+        /// </summary>
+        private static readonly Dictionary<long, long> UiaObservedAt = new Dictionary<long, long>();
+        private static readonly Dictionary<long, int> UiaObservationIds = new Dictionary<long, int>();
         private static long _nextRef = 1;
         private static int _captureSeq;
+        private static int _observationSeq;
+        /// <summary>Observation the walk in progress belongs to.</summary>
+        private static int _currentObservation;
+        /// <summary>Default ref lifetime; 0 disables expiry.</summary>
+        private const int DefaultObservationTtlMs = 180000;
+        /// <summary>Settle time before re-reading state after an action.</summary>
+        private const int ActionSettleMs = 120;
 
         private static void ForgetElement(long reference)
         {
             UiaElements.Remove(reference);
             UiaRuntimeIds.Remove(reference);
+            UiaObservedAt.Remove(reference);
+            UiaObservationIds.Remove(reference);
         }
 
         private static bool SameRuntimeId(int[] a, int[] b)
@@ -1259,6 +1275,8 @@ namespace DshComputerUse
         {
             var reference = _nextRef++;
             UiaElements[reference] = el;
+            UiaObservedAt[reference] = Environment.TickCount;
+            UiaObservationIds[reference] = _currentObservation;
             try { UiaRuntimeIds[reference] = el.GetRuntimeId(); }
             catch { } // some providers do not expose a runtime id; liveness still applies
             if (hwnd.HasValue && hwnd.Value != 0)
@@ -1278,6 +1296,8 @@ namespace DshComputerUse
                 UiaElements.Clear();
                 UiaByWindow.Clear();
                 UiaRuntimeIds.Clear();
+                UiaObservedAt.Clear();
+                UiaObservationIds.Clear();
             }
             return reference;
         }
@@ -1377,6 +1397,9 @@ namespace DshComputerUse
             if (filter != "all" && filter != "interactive")
                 throw new BridgeException("INVALID_ARGS", "filter must be 'interactive' or 'all'");
 
+            // Everything registered from here belongs to one observation, so a
+            // later action can tell how old the picture it is acting on is.
+            _currentObservation = ++_observationSeq;
             var root = RootElementFor(handle);
             // The walk is bounded separately from the node cap, so the cap is spent
             // on controls worth showing instead of being eaten by layout wrappers.
@@ -1441,7 +1464,8 @@ namespace DshComputerUse
                 "truncated", truncated,
                 "view", view,
                 "filter", filter,
-                "hidden", hidden);
+                "hidden", hidden,
+                "observationId", _currentObservation);
         }
 
         /// <summary>
@@ -1485,6 +1509,7 @@ namespace DshComputerUse
                 throw new BridgeException("INVALID_ARGS", "find requires at least one of name / automationId / controlType");
 
             var root = RootElementFor(handle);
+            _currentObservation = ++_observationSeq;
             var condition = Condition.TrueCondition;
             if (!string.IsNullOrEmpty(controlType))
             {
@@ -1530,6 +1555,20 @@ namespace DshComputerUse
                 AutomationElement el;
                 if (!UiaElements.TryGetValue(reference, out el))
                     throw new BridgeException("STALE_REF", "ref " + reference + " is not registered; run uia.tree or uia.find again");
+                // An action is tied to an observation, and an observation expires:
+                // acting on a minutes-old ref means acting on a screen that is gone.
+                var ttlMs = Int(a, "ttlMs", DefaultObservationTtlMs);
+                long observedAt;
+                if (ttlMs > 0 && UiaObservedAt.TryGetValue(reference, out observedAt))
+                {
+                    var age = unchecked(Environment.TickCount - observedAt);
+                    if (age > ttlMs)
+                    {
+                        throw new BridgeException("STALE_OBSERVATION",
+                            "ref " + reference + " was observed " + age + "ms ago (ttl " + ttlMs +
+                            "ms); re-run uia.tree / uia.find before acting on it");
+                    }
+                }
                 try { var probe = el.Current.AutomationId; }
                 catch
                 {
@@ -1579,9 +1618,38 @@ namespace DshComputerUse
             var action = Str(a, "action", null);
             if (string.IsNullOrEmpty(action)) throw new BridgeException("INVALID_ARGS", "action is required");
             var target = ResolveUiaTarget(a);
-            var el = target.Key;
-            var reference = target.Value;
+            var result = PerformUiaAction(target.Key, target.Value, action, a);
+            // Return fresh evidence: the caller learns what became of the control
+            // without paying for a whole new observation.
+            result["after"] = DescribeAfter(target.Key);
+            return result;
+        }
 
+        /// <summary>
+        /// What the target looks like once the action settled. "gone" is the most
+        /// useful answer there is — it is how a dialog closing shows up.
+        /// </summary>
+        private static Dictionary<string, object> DescribeAfter(AutomationElement el)
+        {
+            System.Threading.Thread.Sleep(ActionSettleMs);
+            try
+            {
+                var c = el.Current;
+                var name = c.Name;
+                var password = false;
+                try { password = c.IsPassword; } catch { }
+                if (password) name = "***redacted***";
+                if (name != null && name.Length > 120) name = name.Substring(0, 117) + "...";
+                return Dict("gone", false, "enabled", c.IsEnabled, "offscreen", c.IsOffscreen, "name", name);
+            }
+            catch
+            {
+                return Dict("gone", true);
+            }
+        }
+
+        private static Dictionary<string, object> PerformUiaAction(AutomationElement el, long reference, string action, Dictionary<string, object> a)
+        {
             // Pattern-missing is an action-level failure (ok:false), not an op
             // failure: the model sees the reason and can pick another action.
             object pattern;

@@ -296,6 +296,38 @@ try {
     await expectCallError(client.call('uia.tree', { handle: launchedHandle, filter: 'nonsense' }), 'INVALID_ARGS')
   })
 
+  await test('uia: observations expire and actions report fresh state', async () => {
+    const tree = await client.call('uia.tree', { handle: launchedHandle, maxDepth: 4, maxNodes: 40 })
+    assert.equal(typeof tree.observationId, 'number', 'an observation must be identified')
+
+    // Acting on the window root is side-effect free: the pattern is missing, so
+    // the bridge answers ok:false — and still returns the after-action evidence.
+    const rootRef = tree.nodes[0].ref
+    const acted = await client.call('uia.invoke', { ref: rootRef, action: 'invoke' })
+    assert.equal(acted.ok, false)
+    assert.equal(acted.after.gone, false, 'the root still exists')
+    assert.equal(typeof acted.after.enabled, 'boolean')
+    assert.equal(typeof acted.after.offscreen, 'boolean')
+
+    // Past its ttl the reference is refused rather than acted on.
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    await expectCallError(
+      client.call('uia.invoke', { ref: rootRef, action: 'invoke', ttlMs: 1 }),
+      'STALE_OBSERVATION',
+    )
+
+    // A fresh observation issues fresh refs, which the same action accepts.
+    const again = await client.call('uia.tree', { handle: launchedHandle, maxDepth: 4, maxNodes: 40 })
+    assert.ok(again.observationId > tree.observationId, 'each observation gets its own id')
+    const accepted = await client.call('uia.invoke', { ref: again.nodes[0].ref, action: 'invoke', ttlMs: 60_000 })
+    assert.equal(accepted.ok, false, 'still not invokable, but the ttl accepted the ref')
+
+    // ttlMs: 0 disables expiry entirely.
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const never = await client.call('uia.invoke', { ref: again.nodes[0].ref, action: 'invoke', ttlMs: 0 })
+    assert.equal(never.ok, false)
+  })
+
   await test('uia.find + uia.invoke: focus a control by type', async () => {
     // Win11 notepad exposes its editor as Document (WinUI3), classic builds
     // as Edit — accept either so the test holds on both.

@@ -40,6 +40,8 @@ export interface ComputerUseConfig {
   waitTimeoutMs: number
   /** Default poll interval for computer_wait (ms). */
   waitPollMs: number
+  /** How long a ref from an observation may still be acted on (ms, 0 = never). */
+  observationTtlMs: number
 }
 
 export const NS = 'computer-use'
@@ -64,6 +66,7 @@ export const ConfigSchema: Schema<ComputerUseConfig> = Schema.object({
   overlayIdleHideMs: Schema.number().min(0).max(3600000).default(180000).description('多久没有工具调用后自动隐藏悬浮条(ms),0 表示不自动隐藏'),
   waitTimeoutMs: Schema.number().min(100).max(30000).default(5000).description('computer_wait 默认放弃时间(ms)'),
   waitPollMs: Schema.number().min(50).max(5000).default(250).description('computer_wait 默认轮询间隔(ms)'),
+  observationTtlMs: Schema.number().min(0).max(3600000).default(180000).description('观察过期时间(ms):超过后按旧 ref 施动作会被拒绝,0 表示不过期'),
 })
 
 export function normalizeBackend(value: unknown): CaptureBackend {

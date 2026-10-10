@@ -79,7 +79,7 @@
 | keyboard.press | {keys:string[], action?:'press'\|'down'\|'up'} | {keys} |
 | uia.tree | {handle?, maxDepth?, maxNodes?, view?:'control'\|'content'\|'raw', filter?:'interactive'\|'all'} | {nodes:[{ref,runtimeId,depth,role,name,automationId,enabled,offscreen,password,rect,patterns}], truncated, view, filter, hidden} |
 | uia.find | {handle?, name?, automationId?, controlType?, limit?} | {matches:[{ref,role,name,automationId,rect,patterns}]} |
-| uia.invoke | {ref?, handle?, name?, automationId?, action:'invoke'\|'select'\|'toggle'\|'expand'\|'collapse'\|'setValue'\|'focus', value?} | {ref, action, ok} |
+| uia.invoke | {ref?, handle?, name?, automationId?, action:'invoke'\|'select'\|'toggle'\|'expand'\|'collapse'\|'setValue'\|'focus', value?, ttlMs?} | {ref, action, ok, after:{gone,enabled,offscreen,name}} |
 | clipboard.get | {} | {text} |
 | clipboard.set | {text} | {} |
 | overlay.show | {text?} | {shown, text, width, height} |
@@ -148,6 +148,8 @@ client.dispose()   // 结束子进程，幂等
 - **密码字段脱敏**：`IsPassword` 为真的节点，名字一律替换成 `***redacted***`（凭据字段的标签也不外泄）。实测：本地 HTML 的 `<input type="password">` 在 Chrome 中暴露为 `password:true` 且名字已脱敏，相邻的普通输入框与地址栏不受影响。
 - **先序遍历**：节点按真正的先序（访问即输出、子节点反序入栈）产生，缩进顺序与屏幕上的控件顺序一致——此前是"同层子节点成组先输出且顺序相反"，缩进层级会对不上。
 - **HWND 兜底**：窗口不是桌面直接子元素时（工具窗、被别的进程托管的窗），`FindFirst(Children)` 找不到，改用 `AutomationElement.FromHandle` 直连；实测修掉了 `TextInputHost` 这类窗口的 `HWND_NOT_FOUND`。
+- **观察令牌与过期**：`uia.tree`/`uia.find` 的每次调用是一个**观察**（返回 `observationId`），产出的 ref 记下观察时间。按 ref 施动作超过 `observationTtlMs`（默认 180s，`0` = 不过期）报 `STALE_OBSERVATION`，而不是照着旧画面点下去。配合 RuntimeId 身份校验，"元素没了 / 换成别的控件 / 观察过期"三种情况全部 fail-closed。
+- **动作后回新鲜状态**：`uia.invoke` settle 120ms 后重新读目标控件，返回 `after:{gone,enabled,offscreen,name}`——对话框关掉（`gone:true`）、按钮变灰都能直接看到，省掉"点完再观察一次"那一轮。
 - **spill（落盘）**：clipboard.get 超 4000 字符只回 preview；截图走文件路径而非 base64（最大单项节省）。
 - **window.list**：`windowLimit` 默认 40 行，compact 行格式 `hwnd pid [min,fg] title`（title 截 70；`detail:"full"` 带 className/rect）。
 - **Chromium 提示**：UIA 树为空且窗口是 Chromium 时，工具输出直接附上 `--force-renderer-accessibility` 的修复指引；`window.launch` 对 chrome/edge/brave/chromium/vivaldi **自动补该参数**（`computer-use.browserUiaFlags`，默认开）。

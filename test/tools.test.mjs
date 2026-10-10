@@ -58,6 +58,7 @@ const config = {
   overlayIdleHideMs: 180_000,
   waitTimeoutMs: 5000,
   waitPollMs: 250,
+  observationTtlMs: 180_000,
 }
 
 const results = []
@@ -378,6 +379,14 @@ await test('wait tool stops on the abort signal', async () => {
   )
   setTimeout(() => controller.abort(), 120)
   await assert.rejects(() => pending, /cancelled/)
+})
+
+await test('ui tool forwards the observation ttl when acting on a ref', async () => {
+  const bridge = fakeBridge({ 'uia.invoke': (a) => ({ ref: a.ref, action: a.action, ok: true, ttlMs: a.ttlMs }) })
+  setUiDeps({ call: bridge.call, config: () => config })
+  const r = await uiTool.execute({ action: 'invoke', ref: 5 }, { signal: new AbortController().signal })
+  assert.equal(bridge.calls[0].args.ttlMs, config.observationTtlMs)
+  assert.equal(r.ttlMs, config.observationTtlMs)
 })
 
 for (const set of [setScreenshotDeps, setInputDeps, setWindowDeps, setUiDeps, setWaitDeps]) set(undefined)
