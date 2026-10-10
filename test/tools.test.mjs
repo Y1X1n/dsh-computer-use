@@ -123,6 +123,15 @@ await test('ui tool forwards depth/node caps and maps set_value', async () => {
   assert.equal(setValue.action, 'setValue')
 })
 
+await test('ui tool forwards the requested UIA view and rejects unknown ones', async () => {
+  const bridge = fakeBridge({ 'uia.tree': (a) => ({ nodes: [], truncated: false, view: a.view }) })
+  setUiDeps({ call: bridge.call, config: () => config })
+  await uiTool.execute({ action: 'tree', view: 'raw' }, { signal: new AbortController().signal })
+  assert.equal(bridge.calls[0].args.view, 'raw')
+  await uiTool.execute({ action: 'tree', view: 'nonsense' }, { signal: new AbortController().signal })
+  assert.equal(bridge.calls[1].args.view, undefined, 'an unknown view must fall back to the bridge default')
+})
+
 await test('screenshot tool refuses to run while disabled', async () => {
   const bridge = fakeBridge({ 'screen.capture': () => ({ path: 'x' }) })
   setScreenshotDeps({ call: bridge.call, config: () => ({ ...config, enabled: false }) })

@@ -62,7 +62,7 @@
 | 缓存编译产物（Add-Type → DLL） | Yu-tao-Li-win | ✅ `bridge/computer-bridge.ps1` `Ensure-Compiled`：按源码 hash 编译到 `%LOCALAPPDATA%\dsh-computer-use\engine-cache`，实测冷启动 1090ms → 258ms |
 | 指示器 generation 与健康门控 | Windows-MCP | 待办：`Overlay.change(generation)` |
 | 物理接管检测 + fail-open | Windows-MCP | 待办（需真实物理输入验证） |
-| UIA ControlView + RuntimeId 寻址 | Yu-tao-Li-win / FlaUI | 待办：`Engine.cs` `uia.tree` / ref 注册表 |
+| UIA ControlView + RuntimeId 寻址 | Yu-tao-Li-win / FlaUI | ✅ `Engine.cs`：`view` 默认 `control`（实测省 5–46% 字节）、ref 记 RuntimeId 做身份校验、`AutomationElement.FromHandle` 兜底非桌面子窗口 |
 | 观察令牌 + 过期拒绝 + diff | Anionex | 待办（对应 `docs/DEVELOPMENT.md` §7 的 `actionSent`） |
 | `computer_wait` 有界轮询 | Anionex | 待办 |
 | 交互性打分筛选 + 敏感字段脱敏 | browser-use / FlaUI | 待办：`src/tools/format.ts` 的紧凑渲染 |
