@@ -90,6 +90,8 @@ export const uiTool = {
         automationId: typeof args.automationId === 'string' ? args.automationId : undefined,
         action: bridgeAction,
         value: typeof args.value === 'string' ? args.value : undefined,
+        // How old an observation may be before acting on its refs is refused.
+        ttlMs: cfg.observationTtlMs,
       }
       return { action, ...(await deps.call('uia.invoke', payload)) }
     }
