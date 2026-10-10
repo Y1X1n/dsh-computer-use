@@ -42,6 +42,8 @@ export interface ComputerUseConfig {
   waitPollMs: number
   /** How long a ref from an observation may still be acted on (ms, 0 = never). */
   observationTtlMs: number
+  /** Yield actuation while a person is physically using the machine. */
+  takeoverGuard: boolean
 }
 
 export const NS = 'computer-use'
@@ -67,6 +69,7 @@ export const ConfigSchema: Schema<ComputerUseConfig> = Schema.object({
   waitTimeoutMs: Schema.number().min(100).max(30000).default(5000).description('computer_wait 默认放弃时间(ms)'),
   waitPollMs: Schema.number().min(50).max(5000).default(250).description('computer_wait 默认轮询间隔(ms)'),
   observationTtlMs: Schema.number().min(0).max(3600000).default(180000).description('观察过期时间(ms):超过后按旧 ref 施动作会被拒绝,0 表示不过期'),
+  takeoverGuard: Schema.boolean().default(true).description('人工接管保护:检测到真实键鼠输入时暂停注入动作(读取不受影响),让用户先操作'),
 })
 
 export function normalizeBackend(value: unknown): CaptureBackend {

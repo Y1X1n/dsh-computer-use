@@ -59,6 +59,7 @@ const config = {
   waitTimeoutMs: 5000,
   waitPollMs: 250,
   observationTtlMs: 180_000,
+  takeoverGuard: true,
 }
 
 const results = []

@@ -466,6 +466,34 @@ try {
     assert.equal((await client.call('control.state')).overlayHealthy, true)
   })
 
+  await test('input watcher: hosting installs hooks and injected input is not a takeover', async () => {
+    await client.call('overlay.show', {})
+    const before = await client.call('control.state')
+    assert.equal(before.takeoverGuard, true, 'the guard is on by default')
+    assert.equal(before.physicalInput.installed, true, 'hooks are installed while hosting')
+
+    // The agent's own injected input must never look like a person taking over.
+    await client.call('keyboard.press', { keys: ['shift'], action: 'down' })
+    await client.call('keyboard.press', { keys: ['shift'], action: 'up' })
+    const after = await client.call('control.state')
+    assert.equal(
+      after.physicalInput.lastPhysicalMsAgo,
+      before.physicalInput.lastPhysicalMsAgo,
+      'injected input must not be counted as physical input',
+    )
+    assert.equal(after.physicalInput.takeover, false)
+
+    assert.equal((await client.call('control.guard', { enabled: false })).takeoverGuard, false)
+    await client.call('control.guard', { enabled: true })
+
+    await client.call('overlay.hide')
+    assert.equal(
+      (await client.call('control.state')).physicalInput.installed,
+      false,
+      'hooks are removed once hosting ends, so an idle machine carries none',
+    )
+  })
+
   await test('overlay: a capture hides the strip and restores it afterwards', async () => {
     await client.call('overlay.show', {})
     const shot = await client.call('screen.capture', { format: 'jpeg', maxEdge: 640, quality: 60 })
