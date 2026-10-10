@@ -310,6 +310,7 @@ namespace DshComputerUse
                 case "overlay.show": return Overlay.Show(args);
                 case "overlay.hide": return Overlay.Hide();
                 case "overlay.state": return Overlay.State();
+                case "control.state": return ControlState();
                 default:
                     throw new BridgeException("UNKNOWN_OP", "unknown op '" + op + "'");
             }
@@ -379,8 +380,19 @@ namespace DshComputerUse
             Bitmap shrink = null;
             var originX = 0;
             var originY = 0;
+            var overlayWasVisible = false;
             try
             {
+                // Keep the hosting strip out of the agent's own observation: a
+                // capture containing the indicator both wastes the top strip of
+                // pixels and tells the model something is drawn there.
+                overlayWasVisible = Overlay.IsVisible;
+                if (overlayWasVisible)
+                {
+                    Overlay.SuspendForCapture();
+                    System.Threading.Thread.Sleep(OverlayCaptureSettleMs);
+                }
+
                 if (Has(a, "windowHandle"))
                 {
                     var hwnd = (IntPtr)Long(a, "windowHandle", 0);
@@ -526,10 +538,12 @@ namespace DshComputerUse
                     "format", format, "bytes", data.Length,
                     "quality", format == "png" ? 100 : qualityNow,
                     "base64Bytes", Base64Length(data.Length),
+                    "overlaySuspended", overlayWasVisible,
                     "originX", originX, "originY", originY);
             }
             finally
             {
+                if (overlayWasVisible) Overlay.ResumeAfterCapture();
                 if (shrink != null && !ReferenceEquals(shrink, scaled) && !ReferenceEquals(shrink, bmp)) shrink.Dispose();
                 if (scaled != null && !ReferenceEquals(scaled, bmp)) scaled.Dispose();
                 if (bmp != null) bmp.Dispose();
@@ -542,6 +556,8 @@ namespace DshComputerUse
         private const int QualityStep = 15;
         private const double ShrinkFactor = 0.8;
         private const int MinEdge = 320;
+        /// <summary>Settle time after hiding the overlay so the compositor catches up.</summary>
+        private const int OverlayCaptureSettleMs = 70;
 
         private static byte[] EncodeJpeg(Bitmap img, ImageCodecInfo codec, int quality)
         {
@@ -1027,9 +1043,93 @@ namespace DshComputerUse
             }
         }
 
-        private static object KeyboardPress(Dictionary<string, object> a)
+        // ------------------------------------------------------------------
+        // input ledger
+        //
+        // Every injected key that goes down is recorded until its matching up is
+        // sent, so a caller that dies between down and up (or simply forgets)
+        // cannot leave a stuck modifier on the user's keyboard. The bridge
+        // releases whatever is still held when it shuts down. Mechanism borrowed
+        // from Windows-MCP's control_ledger.py (MIT) — see
+        // docs/borrow-mit-projects.md.
+        // ------------------------------------------------------------------
+
+        private static readonly Dictionary<ushort, string> HeldKeys = new Dictionary<ushort, string>();
+        private static readonly object InputGate = new object();
+
+        private static void TrackKeysDown(ushort[] vks, string[] names)
         {
-            var keys = new List<string>();
+            lock (InputGate)
+            {
+                for (var i = 0; i < vks.Length; i++)
+                {
+                    if (HeldKeys.ContainsKey(vks[i]))
+                        throw new BridgeException("INPUT_HELD",
+                            "key '" + names[i] + "' is already held down; send its up before pressing it again");
+                }
+                for (var i = 0; i < vks.Length; i++) HeldKeys[vks[i]] = names[i];
+            }
+        }
+
+        private static void TrackKeysUp(ushort[] vks)
+        {
+            lock (InputGate)
+            {
+                for (var i = 0; i < vks.Length; i++) HeldKeys.Remove(vks[i]);
+            }
+        }
+
+        private static string[] HeldKeyNames()
+        {
+            lock (InputGate)
+            {
+                var names = new string[HeldKeys.Count];
+                HeldKeys.Values.CopyTo(names, 0);
+                return names;
+            }
+        }
+
+        /// <summary>Release every key this bridge injected and never lifted.</summary>
+        public static void ReleaseHeldInput()
+        {
+            ushort[] vks;
+            lock (InputGate)
+            {
+                if (HeldKeys.Count == 0) return;
+                vks = new ushort[HeldKeys.Count];
+                HeldKeys.Keys.CopyTo(vks, 0);
+            }
+            try
+            {
+                var batch = new INPUT[vks.Length];
+                for (var i = 0; i < vks.Length; i++) batch[i] = KeyInput(vks[i], true);
+                SendBatch(batch);
+            }
+            catch
+            {
+                // Nothing better to do while tearing down; the ledger is cleared
+                // either way so a later call cannot think the key is still held.
+            }
+            TrackKeysUp(vks);
+        }
+
+        /// <summary>Bridge teardown: no injected state may outlive the process.</summary>
+        public static void Shutdown()
+        {
+            try { ReleaseHeldInput(); } catch { }
+            try { Overlay.Hide(); } catch { }
+        }
+
+        private static object ControlState()
+        {
+            return Dict(
+                "heldKeys", HeldKeyNames(),
+                "overlayVisible", Overlay.IsVisible,
+                "overlaySuspended", Overlay.SuspendedForCapture);
+        }
+
+        private static object KeyboardPress(Dictionary<string, object> a)
+        {            var keys = new List<string>();
             if (Has(a, "keys"))
             {
                 var raw = a["keys"] as IEnumerable<object>;
@@ -1041,15 +1141,28 @@ namespace DshComputerUse
             for (var i = 0; i < keys.Count; i++) vks[i] = KeyFor(keys[i]);
             if (action == "down")
             {
-                var batch = new INPUT[vks.Length];
-                for (var i = 0; i < vks.Length; i++) batch[i] = KeyInput(vks[i], false);
-                SendBatch(batch);
+                // Record before injecting: a key that reaches Windows must be
+                // releasable even if the caller never sends its up (borrowed from
+                // Windows-MCP's input ledger, see docs/borrow-mit-projects.md).
+                TrackKeysDown(vks, keys.ToArray());
+                try
+                {
+                    var batch = new INPUT[vks.Length];
+                    for (var i = 0; i < vks.Length; i++) batch[i] = KeyInput(vks[i], false);
+                    SendBatch(batch);
+                }
+                catch
+                {
+                    TrackKeysUp(vks);
+                    throw;
+                }
             }
             else if (action == "up")
             {
                 var batch = new INPUT[vks.Length];
                 for (var i = 0; i < vks.Length; i++) batch[vks.Length - 1 - i] = KeyInput(vks[i], true);
                 SendBatch(batch);
+                TrackKeysUp(vks);
             }
             else
             {
@@ -1493,6 +1606,8 @@ namespace DshComputerUse
         private static Control _pump;
         private static OverlayForm _form;
         private static volatile bool _visible;
+        private static int _suspends;
+        private static bool _hiddenForCapture;
 
         public static object Show(Dictionary<string, object> a)
         {
@@ -1511,7 +1626,9 @@ namespace DshComputerUse
             {
                 if (_form == null) _form = new OverlayForm(Position());
                 _form.SetLabel(text);
-                if (!_form.Visible) _form.Show();
+                // A capture may be in flight; keep the strip out of it and let
+                // ResumeAfterCapture put it back.
+                if (!_form.Visible && _suspends == 0) _form.Show();
                 _form.Redraw();
             });
             _visible = true;
@@ -1528,6 +1645,51 @@ namespace DshComputerUse
         public static object State()
         {
             return Dict("shown", _visible, "width", StripWidth, "height", StripHeight, "defaultText", DefaultText);
+        }
+
+        /// <summary>Whether the strip is currently on screen (used by control.state).</summary>
+        public static bool IsVisible
+        {
+            get { return _visible; }
+        }
+
+        /// <summary>Whether the strip is hidden right now to keep it out of a capture.</summary>
+        public static bool SuspendedForCapture
+        {
+            get { return _suspends > 0; }
+        }
+
+        /// <summary>
+        /// Hide the strip for the duration of one capture and restore it after.
+        /// Without this the agent's own screenshot would contain the indicator,
+        /// which both wastes the top strip of pixels and misleads the model into
+        /// thinking the host is still drawing there. Nested calls are counted.
+        /// </summary>
+        public static void SuspendForCapture()
+        {
+            if (_thread == null) return;
+            lock (Gate)
+            {
+                _suspends++;
+                if (_suspends > 1 || !_visible) return;
+                _hiddenForCapture = true;
+                try { Invoke(delegate { if (_form != null) _form.Hide(); }); }
+                catch { }
+            }
+        }
+
+        public static void ResumeAfterCapture()
+        {
+            if (_thread == null) return;
+            lock (Gate)
+            {
+                if (_suspends > 0) _suspends--;
+                if (_suspends != 0 || !_hiddenForCapture) return;
+                _hiddenForCapture = false;
+                if (!_visible) return;
+                try { Invoke(delegate { if (_form != null) _form.Show(); }); }
+                catch { }
+            }
         }
 
         private static void EnsureThread()
