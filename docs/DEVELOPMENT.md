@@ -66,7 +66,7 @@
 |---|---|---|
 | ping | {} | {version, platform, os, dpi} |
 | screen.list | {} | {monitors:[{index,x,y,width,height,primary}], cursor:{x,y}, dpi} |
-| screen.capture | {monitor?, windowHandle?, region?, maxEdge?, format?:'png'\|'jpeg', quality?} | {path, width, height, format, bytes} |
+| screen.capture | {monitor?, windowHandle?, region?, maxEdge?, format?:'png'\|'jpeg', quality?, budgetKb?, budgetPixels?} | {path, width, height, format, bytes, quality, base64Bytes} |
 | window.list | {limit?} | {windows:[{handle,pid,title,className,x,y,width,height,minimized,foreground}]} |
 | window.focus | {handle} | {handle, title} |
 | window.state | {handle, state:'minimize'\|'maximize'\|'restore'\|'close'} | {handle, state} |
@@ -82,6 +82,13 @@
 | uia.invoke | {ref?, handle?, name?, automationId?, action:'invoke'\|'select'\|'toggle'\|'expand'\|'collapse'\|'setValue'\|'focus', value?} | {ref, action, ok} |
 | clipboard.get | {} | {text} |
 | clipboard.set | {text} | {} |
+| overlay.show | {text?} | {shown, text, width, height} |
+| overlay.hide | {} | {shown:false} |
+| overlay.state | {} | {shown, width, height, defaultText} |
+
+> `screen.capture` 的 `budgetKb`（base64 字节）与 `budgetPixels`（宽×高）是**硬预算**：超限时先按步长 15 降质（下限 40），再按 ×0.8 缩边（下限 320），像素预算先一步精确适配。返回值里的 `quality`/`base64Bytes` 是**实际写入**的值。
+>
+> `overlay.*` 由插件生命周期驱动（首次工具调用 show、插件卸载/空闲 hide），也可手动调用；窗口是分层置顶椭圆条，`WS_EX_TRANSPARENT|WS_EX_NOACTIVATE` 保证鼠标穿透且不抢焦点，桥进程退出即消失。
 
 ### 2.3 Node 侧客户端（src/bridge/client.ts）
 
@@ -108,7 +115,7 @@ client.dispose()   // 结束子进程，幂等
 
 - **enabled 门控**：`config.enabled`（默认 false）为 false 时所有工具直接抛错——总开关即权限模型的最外层。
 - **hwnd/ref 货币**：`computer_window list` 产出的 handle 供 screenshot(window)/ui 使用；ui 产出的 ref 在窗口存活期内稳定。
-- **渲染即裁剪**：每个工具的 `output.render` 决定模型可见文本（windows.ts 把 title 截 120 字符、className 截 60；clipboard.get 超过 4000 字符只给 preview + length）。
+- **渲染即裁剪**：每个工具的 `output.render` 决定模型可见文本。默认 **compact 渲染**（`src/tools/format.ts`）：UIA 树/查找每控件一行 `ref role "name" flags #automationId`、窗口清单每窗一行 `hwnd pid [min,fg] title`；`detail:"full"` 才回落到原始 JSON。实测 uia.tree −78%、window.list −69%（§4.2）。
 - **图像投影**（src/index.ts `withImageProjection`）：截图结果先落盘，仅当路由 `resolveModelInfo().inputModalities` 含 `image` 时经 `attachments.saveImages` 附加 image block；任何一步拒绝都退回纯路径结果。模型看不见图时仍可拿路径做后续处理——token 永远不浪费在 base64 上。
 
 ## 4. Token 控制策略
@@ -120,14 +127,19 @@ client.dispose()   // 结束子进程，幂等
 | screenshotMaxEdge | 1280 | 长边上限，等比缩放后再编码（System.Drawing 重绘 Bitmap） |
 | screenshotQuality | 72 | JPEG 质量；100 时改用 PNG（无损场景留给 OCR/精细对比） |
 | maxEdge（参数） | 160–2560 | 单次调用覆盖设置，"lower saves image tokens" 写进参数描述 |
+| screenshotBudgetPixels | 900000 | 宽×高硬上限；约 1200 图像 token（面积/750 计法），先一步精确适配 |
+| screenshotBudgetKb | 190 | base64 字节硬上限（对齐 ZCode §4.2），超限走降质→缩边 |
 
-**预算收敛编码（借鉴 ZCode，二期实现）**：编码后若 base64 超 190KB 预算——先降质（75→60→45，步长 15，下限 40）再缩边（×0.8，下限 320）。当前实现为单次 maxEdge 缩放，无迭代收敛；接入点在 `screen.capture` 编码处。
+**预算收敛编码（借鉴 ZCode，已实现）**：`screen.capture` 先按 `budgetPixels` 一步缩到目标像素，再按 `budgetKb` 迭代——降质（步长 15、下限 40）→ 缩边（×0.8、下限 320），返回值 `quality`/`base64Bytes` 是实际值。实测：2560×1600、q90 的请求被收敛成 1200×750 级、约 874 图像 token。
+
+**compact 渲染（已实现，见 §4.2）**：UIA 树与窗口清单不再 `JSON.stringify` 整个结果，改为一行一条记录。实测 uia.tree 3350B → 726B（**−78.3%**）、window.list 2448B → 763B（**−68.8%**）；`detail:"full"` 保留原始 JSON 逃生门。
 
 ### 4.2 结构化结果
 
-- **uia.tree**：扁平 nodes 数组（非嵌套，省缩进 token）；`name` 截断 120 字符；默认 `maxDepth=6`、`maxNodes=150`（配置 `uiaMaxDepth/uiaMaxNodes`）；`truncated:true` 明示被截断，模型可按需提高上限或用 `uia.find` 精确定位。
+- **uia.tree**：扁平 nodes 数组（非嵌套，省缩进 token）；默认 `maxDepth=6`、`maxNodes=150`（配置 `uiaMaxDepth/uiaMaxNodes`）；`truncated:true` 明示被截断，模型可按需提高上限或用 `uia.find` 精确定位。模型看到的是 **compact 行**（`ref role "name" flags #automationId`，name 截 60），`detail:"full"` 才回原始 JSON。
 - **spill（落盘）**：clipboard.get 超 4000 字符只回 preview；截图走文件路径而非 base64（最大单项节省）。
-- **window.list**：`windowLimit` 默认 40 行。
+- **window.list**：`windowLimit` 默认 40 行，compact 行格式 `hwnd pid [min,fg] title`（title 截 70；`detail:"full"` 带 className/rect）。
+- **Chromium 提示**：UIA 树为空且窗口是 Chromium 时，工具输出直接附上 `--force-renderer-accessibility` 的修复指引；`window.launch` 对 chrome/edge/brave/chromium/vivaldi **自动补该参数**（`computer-use.browserUiaFlags`，默认开）。
 - **静态工具描述**：description/parameters 全为字面量（无运行时拼接），保证 prompt-cache 前缀稳定——这是 zcode-cua `sync-skill-from-zcode-cua.mjs` 那类"字符串两仓各写一遍必然漂移"事故的反面教材：**工具描述改动 = 缓存全失效**，须当作发版级变更。
 
 ### 4.3 观察纪律（借鉴 ZCode/Codex，写入工具描述的约定）
@@ -144,10 +156,11 @@ client.dispose()   // 结束子进程，幂等
 2. **工具级门控**：每个 execute 先查 `cfg.enabled`。
 3. **进程边界**：桥只接受 NDJSON 请求，无 shell 插值；`window.launch` 是唯一会拉起新进程的 op，参数显式 `command/args/cwd`（不走 shell 字符串拼接）。
 4. **焦点礼貌**：除 window.focus / window.launch 外无任何前台抢占；截图默认 PrintWindow（后台可截，不抢焦点）。
+5. **托管可见**：agent 一旦开始操作，屏幕顶部出现黑底白字椭圆条「Deepseek Harness托管中」（`overlay.show`），鼠标穿透、不抢焦点、不进 Alt-Tab；插件卸载/总开关关闭/空闲超时即消失，桥进程退出时窗口随进程一起消失。文案与开关见 `computer-use.overlay*`。
 
 二期候选（对照调研 §5）：
 
-- **悬浮提示条**：调用期间在屏幕角落显示"Agent 正在操作你的电脑（Esc 取消）"——WinForms 置顶无边框窗体，accent 色与文案放 bridge 配置（对齐 codex `computer-use/config.json` 的 strings/accentColor 结构）。
+- ~~**悬浮提示条**~~：已实现为顶部托管条（`overlay.show/hide/state`，见 §5.5）。
 - **物理 Esc 中断**：全局键盘钩子置一个取消标志，桥在动作间隙检查并返回 `{"event":"interrupt"}` 事件帧（协议已预留无 id 事件行）。
 - **approval 事件**：`window.launch` 等敏感 op 可先发 `approval_request` 事件帧，由宿主 UI 决断后继续（对齐 codex `codex_approval_kind` 流）。
 
@@ -196,9 +209,10 @@ client.dispose()   // 结束子进程，幂等
 
 | 项 | 现状 | 方向 |
 |---|---|---|
-| 截图预算 | 单次 maxEdge 缩放 | §4.1 收敛编码（降质→缩边循环 + 190KB 预算） |
-| uia.tree diff | 无 | compact 树 + "模型见过的树"基线 diff（ZCode tree_shown_to_model 语义） |
+| 截图预算 | ✅ 已实现（像素+字节双预算，实测 874 token/张） | 按需微调默认值 |
+| uia.tree diff | compact 树已实现（−78%），diff 未做 | compact 树 + "模型见过的树"基线 diff（ZCode tree_shown_to_model 语义） |
 | actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引 |
-| 悬浮提示/Esc | 无 | §5 二期候选 |
+| 悬浮条/Esc | 悬浮条 ✅ 已实现（顶部椭圆，穿透置顶）；Esc 中断未做 | §5 二期候选（物理 Esc） |
+| 冷启动 | 插件加载时预热 ping（省去首次调用等 Add-Type 编译 ~0.9s） | Add-Type 产物落盘缓存，进一步降到 <250ms |
 | 多会话租约 | 无 | §6.4，接 MCP 前置条件 |
 | 窗口还原副作用 | PrintWindow 规避 | 保持默认；若引入 WGC 后端（Windows.Graphics.Capture via WinRT），可后台截最小化窗口且零焦点干扰 |

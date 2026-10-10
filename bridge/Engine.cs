@@ -307,6 +307,9 @@ namespace DshComputerUse
                 case "uia.invoke": return UiaInvoke(args);
                 case "clipboard.get": return ClipboardGet();
                 case "clipboard.set": return ClipboardSet(args);
+                case "overlay.show": return Overlay.Show(args);
+                case "overlay.hide": return Overlay.Hide();
+                case "overlay.state": return Overlay.State();
                 default:
                     throw new BridgeException("UNKNOWN_OP", "unknown op '" + op + "'");
             }
@@ -373,6 +376,7 @@ namespace DshComputerUse
 
             Bitmap bmp = null;
             Bitmap scaled = null;
+            Bitmap shrink = null;
             var originX = 0;
             var originY = 0;
             try
@@ -454,38 +458,118 @@ namespace DshComputerUse
                     scaled = bmp;
                 }
 
-                _captureSeq++;
-                var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-                var path = Path.Combine(dir, "capture-" + stamp + "-" + _captureSeq + (format == "png" ? ".png" : ".jpg"));
+                // Budget convergence. One capture must never cost an unbounded
+                // number of image tokens, so encode, then trade quality (JPEG
+                // only) and finally edges until the base64 payload fits. The
+                // reported quality/size are the ones actually written.
+                var budgetB64 = (long)Math.Max(0, Int(a, "budgetKb", 0)) * 1024;
+                var budgetPixels = Math.Max(0L, Long(a, "budgetPixels", 0));
+                ImageCodecInfo codec = null;
                 if (format == "png")
                 {
-                    scaled.Save(path, ImageFormat.Png);
+                    codec = null;
                 }
                 else
                 {
-                    ImageCodecInfo codec = null;
                     foreach (var enc in ImageCodecInfo.GetImageEncoders())
                         if (enc.MimeType == "image/jpeg") { codec = enc; break; }
-                    using (var p = new EncoderParameters(1))
-                    {
-                        p.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)quality);
-                        scaled.Save(path, codec, p);
-                    }
                 }
 
-                var bytes = 0;
-                try { bytes = (int)new FileInfo(path).Length; } catch { }
+                var qualityNow = quality;
+                var source = scaled;
+                var data = format == "png" ? EncodePng(source) : EncodeJpeg(source, codec, qualityNow);
+                while (budgetB64 > 0 && format != "png" && qualityNow > MinQuality && Base64Length(data.Length) > budgetB64)
+                {
+                    qualityNow = Math.Max(MinQuality, qualityNow - QualityStep);
+                    data = EncodeJpeg(source, codec, qualityNow);
+                }
+                // Fit the pixel budget in one step, so a capture lands as close to
+                // the allowed size as possible; the 0.8 walk below then only pays
+                // for the base64 budget instead of overshooting both.
+                if (budgetPixels > 0 && (long)outW * outH > budgetPixels)
+                {
+                    var fit = Math.Sqrt((double)budgetPixels / ((double)outW * outH));
+                    var fitW = Math.Max(1, (int)Math.Floor(outW * fit));
+                    var fitH = Math.Max(1, (int)Math.Floor(outH * fit));
+                    var fitted = new Bitmap(source, fitW, fitH);
+                    if (shrink != null) shrink.Dispose();
+                    shrink = fitted;
+                    source = fitted;
+                    outW = fitW;
+                    outH = fitH;
+                    data = format == "png" ? EncodePng(source) : EncodeJpeg(source, codec, qualityNow);
+                }
+
+                while (Math.Max(outW, outH) > MinEdge &&
+                       ((budgetB64 > 0 && Base64Length(data.Length) > budgetB64) ||
+                        (budgetPixels > 0 && (long)outW * outH > budgetPixels)))
+                {
+                    var nextW = Math.Max(1, (int)Math.Floor(outW * ShrinkFactor));
+                    var nextH = Math.Max(1, (int)Math.Floor(outH * ShrinkFactor));
+                    var smaller = new Bitmap(source, nextW, nextH);
+                    if (shrink != null) shrink.Dispose();
+                    shrink = smaller;
+                    source = smaller;
+                    outW = nextW;
+                    outH = nextH;
+                    data = format == "png" ? EncodePng(source) : EncodeJpeg(source, codec, qualityNow);
+                }
+
+                _captureSeq++;
+                var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                var path = Path.Combine(dir, "capture-" + stamp + "-" + _captureSeq + (format == "png" ? ".png" : ".jpg"));
+                File.WriteAllBytes(path, data);
+
                 return Dict(
                     "path", path,
                     "width", outW, "height", outH,
-                    "format", format, "bytes", bytes,
+                    "format", format, "bytes", data.Length,
+                    "quality", format == "png" ? 100 : qualityNow,
+                    "base64Bytes", Base64Length(data.Length),
                     "originX", originX, "originY", originY);
             }
             finally
             {
+                if (shrink != null && !ReferenceEquals(shrink, scaled) && !ReferenceEquals(shrink, bmp)) shrink.Dispose();
                 if (scaled != null && !ReferenceEquals(scaled, bmp)) scaled.Dispose();
                 if (bmp != null) bmp.Dispose();
             }
+        }
+
+        // Screenshot budget knobs (mirrors the ZCode capture pipeline documented
+        // in docs/research-computer-use.md §4.2): quality first, then edges.
+        private const int MinQuality = 40;
+        private const int QualityStep = 15;
+        private const double ShrinkFactor = 0.8;
+        private const int MinEdge = 320;
+
+        private static byte[] EncodeJpeg(Bitmap img, ImageCodecInfo codec, int quality)
+        {
+            if (codec == null) throw new BridgeException("OP_FAILED", "no JPEG encoder is available");
+            using (var p = new EncoderParameters(1))
+            {
+                p.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)quality);
+                using (var ms = new MemoryStream())
+                {
+                    img.Save(ms, codec, p);
+                    return ms.ToArray();
+                }
+            }
+        }
+
+        private static byte[] EncodePng(Bitmap img)
+        {
+            using (var ms = new MemoryStream())
+            {
+                img.Save(ms, ImageFormat.Png);
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>Base64 payload length of a byte count — the number the model's image budget sees.</summary>
+        private static long Base64Length(long bytes)
+        {
+            return ((bytes + 2) / 3) * 4;
         }
 
         // ------------------------------------------------------------------
@@ -1336,6 +1420,282 @@ namespace DshComputerUse
                 {
                     if (attempt >= 1) throw new BridgeException("OP_FAILED", "clipboard busy: " + ex.Message);
                     System.Threading.Thread.Sleep(150);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Top-of-screen hosting strip: a black, click-through, always-on-top bar
+    /// that tells the person at the keyboard that the agent is driving the
+    /// desktop. It renders on its own STA thread with a private message loop, so
+    /// the bridge keeps answering NDJSON while the strip is up, and it carries
+    /// WS_EX_TRANSPARENT / WS_EX_NOACTIVATE so it can never swallow a click or
+    /// steal focus. The thread is a background thread, so the strip also
+    /// disappears the moment the bridge process exits: "hosting ended" does not
+    /// depend on anyone calling overlay.hide.
+    /// </summary>
+    internal static class Overlay
+    {
+        private const int WS_EX_LAYERED = 0x00080000;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const int ULW_ALPHA = 0x00000002;
+        private const byte AC_SRC_OVER = 0x00;
+        private const byte AC_SRC_ALPHA = 0x01;
+
+        internal const int StripWidth = 320;
+        internal const int StripHeight = 46;
+        internal const string DefaultText = "Deepseek Harness托管中";
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIZE { public int cx; public int cy; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int x; public int y; }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize,
+            IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteDC(IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        private static readonly object Gate = new object();
+        private static readonly System.Threading.ManualResetEventSlim Ready =
+            new System.Threading.ManualResetEventSlim(false);
+        private static System.Threading.Thread _thread;
+        private static Control _pump;
+        private static OverlayForm _form;
+        private static volatile bool _visible;
+
+        public static object Show(Dictionary<string, object> a)
+        {
+            var text = DefaultText;
+            if (a != null && a.ContainsKey("text") && a["text"] != null)
+            {
+                var asked = Convert.ToString(a["text"]);
+                if (!string.IsNullOrWhiteSpace(asked)) text = asked;
+            }
+
+            EnsureThread();
+            if (!Ready.Wait(2500))
+                throw new BridgeException("OVERLAY_UNAVAILABLE", "overlay thread did not become ready within 2.5s");
+
+            Invoke(delegate
+            {
+                if (_form == null) _form = new OverlayForm(Position());
+                _form.SetLabel(text);
+                if (!_form.Visible) _form.Show();
+                _form.Redraw();
+            });
+            _visible = true;
+            return Dict("shown", true, "text", text, "width", StripWidth, "height", StripHeight);
+        }
+
+        public static object Hide()
+        {
+            if (_thread != null) Invoke(delegate { if (_form != null) _form.Hide(); });
+            _visible = false;
+            return Dict("shown", false);
+        }
+
+        public static object State()
+        {
+            return Dict("shown", _visible, "width", StripWidth, "height", StripHeight, "defaultText", DefaultText);
+        }
+
+        private static void EnsureThread()
+        {
+            if (_thread != null) return;
+            lock (Gate)
+            {
+                if (_thread != null) return;
+                var t = new System.Threading.Thread(ThreadMain);
+                t.IsBackground = true;
+                t.Name = "dsh-computer-use-overlay";
+                t.SetApartmentState(System.Threading.ApartmentState.STA);
+                t.Start();
+                _thread = t;
+            }
+        }
+
+        private static void ThreadMain()
+        {
+            try
+            {
+                // A bare control gives this thread a handle to marshal onto; the
+                // context keeps the message loop alive without showing anything.
+                _pump = new Control();
+                _pump.CreateControl();
+                if (!_pump.IsHandleCreated)
+                    throw new BridgeException("OVERLAY_UNAVAILABLE", "could not create the overlay message pump");
+                Ready.Set();
+                Application.Run(new ApplicationContext());
+            }
+            catch
+            {
+                Ready.Set();
+            }
+        }
+
+        private static void Invoke(Action action)
+        {
+            var pump = _pump;
+            if (pump == null) { action(); return; }
+            if (pump.InvokeRequired) pump.Invoke(action);
+            else action();
+        }
+
+        private static POINT Position()
+        {
+            // A non-interactive session can have no primary screen at all; the
+            // strip is best-effort, so fall back to a sane desktop instead of
+            // failing the whole overlay op.
+            var area = new Rectangle(0, 0, 0, 0);
+            try
+            {
+                var screen = Screen.PrimaryScreen;
+                if (screen != null) area = screen.WorkingArea;
+            }
+            catch { }
+            if (area.Width <= 0 || area.Height <= 0) area = new Rectangle(0, 0, 1920, 1080);
+            return new POINT { x = area.Left + (area.Width - StripWidth) / 2, y = area.Top + 8 };
+        }
+
+        private static Dictionary<string, object> Dict(params object[] pairs)
+        {
+            var d = new Dictionary<string, object>();
+            for (var i = 0; i + 1 < pairs.Length; i += 2) d[Convert.ToString(pairs[i])] = pairs[i + 1];
+            return d;
+        }
+
+        private sealed class OverlayForm : Form
+        {
+            private string _label = DefaultText;
+
+            internal OverlayForm(POINT position)
+            {
+                FormBorderStyle = FormBorderStyle.None;
+                ShowInTaskbar = false;
+                StartPosition = FormStartPosition.Manual;
+                TopMost = true;
+                Size = new Size(StripWidth, StripHeight);
+                Location = new Point(position.x, position.y);
+                SetStyle(ControlStyles.Opaque | ControlStyles.UserPaint, true);
+            }
+
+            internal void SetLabel(string text)
+            {
+                _label = string.IsNullOrWhiteSpace(text) ? DefaultText : text;
+            }
+
+            protected override CreateParams CreateParams
+            {
+                get
+                {
+                    var cp = base.CreateParams;
+                    cp.ExStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                    return cp;
+                }
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                Redraw();
+            }
+
+            /// <summary>
+            /// Paints the strip into a 32bpp ARGB bitmap and hands it to the
+            /// compositor. That is what makes the ellipse edges smooth; a
+            /// Region-clipped window would be visibly jagged.
+            /// </summary>
+            internal void Redraw()
+            {
+                if (!IsHandleCreated) return;
+                using (var bmp = new Bitmap(StripWidth, StripHeight, PixelFormat.Format32bppArgb))
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                        g.Clear(Color.Transparent);
+                        using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+                        {
+                            path.AddEllipse(0, 0, StripWidth - 1, StripHeight - 1);
+                            using (var fill = new SolidBrush(Color.FromArgb(235, 0, 0, 0)))
+                                g.FillPath(fill, path);
+                        }
+                        using (var font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Regular, GraphicsUnit.Point))
+                        using (var brush = new SolidBrush(Color.White))
+                        using (var format = new StringFormat
+                        {
+                            Alignment = StringAlignment.Center,
+                            LineAlignment = StringAlignment.Center,
+                            Trimming = StringTrimming.EllipsisCharacter
+                        })
+                        {
+                            g.DrawString(_label, font, brush, new RectangleF(14, 0, StripWidth - 28, StripHeight), format);
+                        }
+                    }
+                    ApplyLayered(bmp);
+                }
+            }
+
+            private void ApplyLayered(Bitmap bmp)
+            {
+                var screenDc = GetDC(IntPtr.Zero);
+                var memDc = CreateCompatibleDC(screenDc);
+                var hBitmap = IntPtr.Zero;
+                var previous = IntPtr.Zero;
+                try
+                {
+                    hBitmap = bmp.GetHbitmap(Color.FromArgb(0));
+                    previous = SelectObject(memDc, hBitmap);
+                    var size = new SIZE { cx = StripWidth, cy = StripHeight };
+                    var source = new POINT { x = 0, y = 0 };
+                    var destination = new POINT { x = Left, y = Top };
+                    var blend = new BLENDFUNCTION
+                    {
+                        BlendOp = AC_SRC_OVER,
+                        BlendFlags = 0,
+                        SourceConstantAlpha = 255,
+                        AlphaFormat = AC_SRC_ALPHA
+                    };
+                    UpdateLayeredWindow(Handle, screenDc, ref destination, ref size, memDc, ref source, 0, ref blend, ULW_ALPHA);
+                }
+                finally
+                {
+                    if (previous != IntPtr.Zero) SelectObject(memDc, previous);
+                    if (hBitmap != IntPtr.Zero) DeleteObject(hBitmap);
+                    DeleteDC(memDc);
+                    ReleaseDC(IntPtr.Zero, screenDc);
                 }
             }
         }

@@ -71,8 +71,38 @@ export function apply(ctx: Context, config: unknown): void {
     return bridge
   }
 
+  // ── Hosting overlay ────────────────────────────────────────────────────
+  // Shown on the first successful tool call and kept up while the agent is
+  // driving the desktop; hidden when the plugin unloads, when the master switch
+  // goes off, or after an idle stretch. Every overlay op is best-effort: a
+  // bridge that cannot draw the strip must never fail a tool call.
+  let overlayShown = false
+  let idleTimer: ReturnType<typeof setTimeout> | null = null
+
+  const hideOverlay = (): void => {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+    if (!overlayShown) return
+    overlayShown = false
+    void bridge?.call('overlay.hide').catch(() => undefined)
+  }
+
+  const noteActivity = (): void => {
+    const cfg = getConfig()
+    if (!cfg.enabled || !cfg.overlay) { hideOverlay(); return }
+    if (!overlayShown) {
+      overlayShown = true
+      void getBridge().call('overlay.show', { text: cfg.overlayText }).catch(() => { overlayShown = false })
+    }
+    if (idleTimer) clearTimeout(idleTimer)
+    if (cfg.overlayIdleHideMs > 0) {
+      idleTimer = setTimeout(hideOverlay, cfg.overlayIdleHideMs)
+      ;(idleTimer as unknown as { unref?: () => void }).unref?.()
+    }
+  }
+
   const deps: ToolDeps = {
-    call: (op, args, opts) => getBridge().call(op, args, opts),
+    call: <T,>(op: string, args?: Record<string, unknown>, opts?: { timeoutMs?: number }) =>
+      getBridge().call<T>(op, args, opts).then((result) => { noteActivity(); return result }),
     config: () => getConfig(),
   }
   setScreenshotDeps(deps)
@@ -81,6 +111,7 @@ export function apply(ctx: Context, config: unknown): void {
   setUiDeps(deps)
 
   lctx.effect?.(() => () => {
+    hideOverlay()
     setScreenshotDeps(undefined)
     setInputDeps(undefined)
     setWindowDeps(undefined)
@@ -88,6 +119,10 @@ export function apply(ctx: Context, config: unknown): void {
     void bridge?.dispose().catch(() => undefined)
     bridge = null
   })
+
+  // Warm the sidecar during load: the first op compiles Engine.cs (~0.9s), and
+  // paying that here keeps the first real tool call responsive.
+  if (getConfig().enabled) void getBridge().call('ping').catch(() => undefined)
 
   // ── Tool registration, guarded on the enabled switch at execution time.
   lctx.inject?.(['tools'], (sctx) => {

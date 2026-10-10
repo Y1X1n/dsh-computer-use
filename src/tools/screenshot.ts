@@ -69,6 +69,8 @@ async function runScreenshot(args: Record<string, unknown>, signal: AbortSignal)
     quality: cfg.screenshotQuality,
   }
   if (cfg.captureDir) bridgeArgs.dir = cfg.captureDir
+  if (cfg.screenshotBudgetKb > 0) bridgeArgs.budgetKb = cfg.screenshotBudgetKb
+  if (cfg.screenshotBudgetPixels > 0) bridgeArgs.budgetPixels = cfg.screenshotBudgetPixels
   if (cfg.captureBackend === 'gdi' && target === 'window') bridgeArgs.forceGdi = true
 
   if (target === 'window') {

@@ -49,6 +49,12 @@ const config = {
   bridgeTimeoutMs: 30_000,
   captureDir: '',
   captureBackend: 'printwindow',
+  screenshotBudgetKb: 190,
+  screenshotBudgetPixels: 900_000,
+  browserUiaFlags: true,
+  overlay: true,
+  overlayText: 'Deepseek Harness托管中',
+  overlayIdleHideMs: 180_000,
 }
 
 const results = []
@@ -180,6 +186,62 @@ await test('bridge client maps UNKNOWN_OP frames to typed errors', async () => {
     (error) => error.code === 'UNKNOWN_OP' && /nope/.test(error.message),
   )
   await client.dispose()
+})
+
+// ── compact renderers + budgets (the token-budget release) ───────────────────
+
+await test('window list renders one compact line per window, not JSON', async () => {
+  const value = {
+    count: 1,
+    windows: [{ handle: 11, pid: 22, title: 'x'.repeat(200), className: 'Chrome_WidgetWin_1', minimized: true, foreground: false }],
+  }
+  const compact = windowTool.output.render({ action: 'list' }, value)[0].text
+  assert.ok(!compact.trimStart().startsWith('{'), 'compact render must not be raw JSON')
+  assert.ok(compact.includes('11 22 [min]'), compact)
+  assert.ok(compact.split('\n')[1].length < 100, 'title must be clipped, not echoed whole')
+  assert.ok(windowTool.output.render({ detail: 'full' }, value)[0].text.trimStart().startsWith('{'), 'detail=full keeps the raw value')
+})
+
+await test('ui tree renders compact rows and names the Chromium fix when empty', async () => {
+  const nodes = [{ ref: 7, depth: 1, role: 'Button', name: '保存', automationId: 'save', patterns: ['Invoke', 'ScrollItem'] }]
+  const text = uiTool.output.render({ action: 'tree' }, { action: 'tree', nodes, truncated: false })[0].text
+  assert.ok(text.startsWith('tree nodes=1'), text)
+  assert.ok(text.includes('7 Button "保存" press #save'), text)
+  const empty = uiTool.output.render({ action: 'tree' }, { action: 'tree', nodes: [], truncated: false })[0].text
+  assert.ok(/force-renderer-accessibility/.test(empty), 'an empty tree must name the Chromium fix')
+})
+
+await test('window launch adds renderer accessibility for Chromium browsers', async () => {
+  const bridge = fakeBridge({ 'window.launch': (a) => ({ pid: 1, handle: 2, title: 't', args: a.args }) })
+  setWindowDeps({ call: bridge.call, config: () => config })
+  const r = await windowTool.execute(
+    { action: 'launch', command: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
+    { signal: new AbortController().signal },
+  )
+  assert.ok(r.launchArgs.includes('--force-renderer-accessibility'), JSON.stringify(r.launchArgs))
+  assert.ok(bridge.calls[0].args.args.includes('--force-renderer-accessibility'), 'the flag must reach the bridge')
+})
+
+await test('window launch leaves non-browser commands untouched', async () => {
+  const bridge = fakeBridge({ 'window.launch': () => ({ pid: 1, handle: 2, title: 't' }) })
+  setWindowDeps({ call: bridge.call, config: () => config })
+  const r = await windowTool.execute({ action: 'launch', command: 'notepad.exe' }, { signal: new AbortController().signal })
+  assert.deepEqual(r.launchArgs, [], 'plain apps must not get browser flags')
+})
+
+await test('window launch respects the browserUiaFlags switch', async () => {
+  const bridge = fakeBridge({ 'window.launch': () => ({ pid: 1, handle: 2, title: 't' }) })
+  setWindowDeps({ call: bridge.call, config: () => ({ ...config, browserUiaFlags: false }) })
+  const r = await windowTool.execute({ action: 'launch', command: 'chrome.exe' }, { signal: new AbortController().signal })
+  assert.deepEqual(r.launchArgs, [])
+})
+
+await test('screenshot tool forwards both capture budgets', async () => {
+  const bridge = fakeBridge({ 'screen.capture': (a) => ({ path: 'x', budgetKb: a.budgetKb, budgetPixels: a.budgetPixels }) })
+  setScreenshotDeps({ call: bridge.call, config: () => config })
+  await screenshotTool.execute({ target: 'screen' }, { signal: new AbortController().signal })
+  assert.equal(bridge.calls[0].args.budgetKb, 190)
+  assert.equal(bridge.calls[0].args.budgetPixels, 900_000)
 })
 
 for (const set of [setScreenshotDeps, setInputDeps, setWindowDeps, setUiDeps]) set(undefined)

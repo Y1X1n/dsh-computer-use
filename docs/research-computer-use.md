@@ -263,6 +263,8 @@ while (b64Len(currentData.length) > maxB64 && Math.max(w, h) > SHRINK_MIN_EDGE) 
 - ZCode：`get_app_state` 返回 `detail="compact"` 树（每元素 `index + kind + name + capability flags (pressable/editable/has_menu/focused)`），`detail="full"` 才带 bounds 与完整 actions；树支持 **diffing**（相对"模型见过的树"输出 removed/added/changed 增量，未展示过的树不能当基线——`tree_shown_to_model=false` 语义）；树过大按优先级裁剪（保祖先），header 标注 `indices are sparse`，`app.elements()` 可取全量行。
 - 元素寻址都按"最新一次观察的整数索引"，观察一次重排一次；元素消失 fail-closed（`ELEMENT_UNAVAILABLE`）。
 
+**本插件实测补充（2026-10-10）**：Chromium（Chrome/Edge）**默认不向 UIA 暴露网页内容**——`uia.tree` 只到 `Window/Pane`，`uia.find` 命中 0 个 Hyperlink。加上 `--force-renderer-accessibility` 启动后，同一个 GitHub 页面立刻能读到 `Button/Hyperlink/Text` 并可用 ref 精确 invoke（本插件已在 `window.launch` 对 chrome/edge/brave/chromium/vivaldi 自动补该参数，并在空树结果里给出提示）。也就是说 §4.3 说的"AX/UIA 优先"在 Chromium 上是有**前提条件**的，这个前提必须由启动参数提供，不能靠重试。
+
 ---
 
 ## 5. 权限与安全（问题 5）
