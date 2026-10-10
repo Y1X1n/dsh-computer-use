@@ -57,6 +57,7 @@ npm pack
 
 - [开发文档](docs/DEVELOPMENT.md) — 架构、协议、扩展指南
 - [调研报告](docs/research-computer-use.md) — zcode/codex computer-use 逆向分析
+- [MIT 借鉴清单](docs/borrow-mit-projects.md) — 第三方项目来源、借鉴点与许可归属
 - [PR 流程](docs/PR-WORKFLOW.md) — 本仓库强制 PR，禁止直接 push main
 - [贡献指南](CONTRIBUTING.md)
 
