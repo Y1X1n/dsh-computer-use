@@ -63,6 +63,18 @@ interface UiNode {
   name?: string
   automationId?: string
   patterns?: unknown
+  enabled?: boolean
+  offscreen?: boolean
+  password?: boolean
+}
+
+/** State that changes how the agent should treat a control, not what it can do. */
+function stateList(node: UiNode): string {
+  const states: string[] = []
+  if (node.password === true) states.push('pw')
+  if (node.enabled === false) states.push('dis')
+  if (node.offscreen === true) states.push('off')
+  return states.length ? `[${states.join(',')}]` : ''
 }
 
 function nodeLine(node: UiNode, indent: boolean): string {
@@ -70,9 +82,11 @@ function nodeLine(node: UiNode, indent: boolean): string {
   const role = node.role ?? '?'
   const name = clip(String(node.name ?? ''), 60)
   const flags = flagList(node.patterns)
+  const states = stateList(node)
   const parts = [String(ref), role]
   if (name) parts.push(`"${name}"`)
   if (flags) parts.push(flags)
+  if (states) parts.push(states)
   if (node.automationId) parts.push('#' + clip(String(node.automationId), 40))
   const prefix = indent ? '  '.repeat(Math.min(Math.max(node.depth ?? 0, 0), 6)) : ''
   return prefix + parts.join(' ')
@@ -94,6 +108,7 @@ export function renderUi(args: unknown, value: unknown): string {
     nodes?: UiNode[]
     matches?: UiNode[]
     count?: number
+    hidden?: number
     truncated?: boolean
     ref?: number
     ok?: boolean
@@ -101,10 +116,17 @@ export function renderUi(args: unknown, value: unknown): string {
 
   if (Array.isArray(v.nodes)) {
     const rows = v.nodes.map((n) => nodeLine(n, true))
-    const header = `tree nodes=${rows.length}${v.truncated ? ' truncated=true' : ''}`
+    const bits = [`nodes=${rows.length}`]
+    const hidden = typeof v.hidden === 'number' ? v.hidden : 0
+    if (hidden > 0) bits.push(`hidden=${hidden}`)
+    if (v.truncated) bits.push('truncated=true')
+    const header = `tree ${bits.join(' ')}`
     if (!rows.length) return [header, CHROMIUM_HINT].join('\n')
+    const notes: string[] = []
+    if (hidden > 0) notes.push(`${hidden} unnamed wrappers hidden (detail:"full" shows every node)`)
+    if (v.truncated) notes.push('hit the node cap; raise maxNodes or narrow with find')
     const body = [header, ...rows].join('\n')
-    return v.truncated ? body + '\n(tree hit the node cap; raise maxNodes or narrow with find)' : body
+    return notes.length ? body + '\n(' + notes.join('; ') + ')' : body
   }
 
   if (Array.isArray(v.matches)) {

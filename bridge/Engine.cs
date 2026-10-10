@@ -1299,7 +1299,7 @@ namespace DshComputerUse
             }
         }
 
-        private static object UiaNode(AutomationElement el, int depth, long? hwnd)
+        private static Dictionary<string, object> UiaNode(AutomationElement el, int depth, long? hwnd)
         {
             var c = el.Current;
             var patterns = new List<string>();
@@ -1319,6 +1319,15 @@ namespace DshComputerUse
             if (autoId != null && autoId.Length > 120) autoId = autoId.Substring(0, 117) + "...";
             var role = "Unknown";
             try { role = c.ControlType.ProgrammaticName.Replace("ControlType.", string.Empty); } catch { }
+            var enabled = true;
+            var offscreen = false;
+            var password = false;
+            try { enabled = c.IsEnabled; } catch { }
+            try { offscreen = c.IsOffscreen; } catch { }
+            try { password = c.IsPassword; } catch { }
+            // A credential field must never hand its label to the model, not even
+            // as "context" — the provider decides what counts as a password field.
+            if (password) name = "***redacted***";
 
             int[] runtimeId = null;
             try { runtimeId = el.GetRuntimeId(); } catch { }
@@ -1330,8 +1339,26 @@ namespace DshComputerUse
                 "role", role,
                 "name", name,
                 "automationId", autoId,
+                "enabled", enabled,
+                "offscreen", offscreen,
+                "password", password,
                 "rect", Dict("x", rx, "y", ry, "width", rw, "height", rh),
                 "patterns", patterns.ToArray());
+        }
+
+        /// <summary>One pending step of the pre-order UIA walk.</summary>
+        private sealed class UiaFrame
+        {
+            public readonly AutomationElement Element;
+            public readonly int Depth;
+            public readonly int Parent;
+
+            public UiaFrame(AutomationElement element, int depth, int parent)
+            {
+                Element = element;
+                Depth = depth;
+                Parent = parent;
+            }
         }
 
         private static object UiaTree(Dictionary<string, object> a)
@@ -1344,38 +1371,104 @@ namespace DshComputerUse
             var maxNodes = Int(a, "maxNodes", 150);
             if (maxNodes < 1) maxNodes = 1;
             if (maxNodes > 400) maxNodes = 400;
-
-            var root = RootElementFor(handle);
             var view = Str(a, "view", "control");
             var walker = WalkerFor(view);
-            var nodes = new List<object> { UiaNode(root, 0, handle) };
-            var truncated = false;
+            var filter = Str(a, "filter", "interactive");
+            if (filter != "all" && filter != "interactive")
+                throw new BridgeException("INVALID_ARGS", "filter must be 'interactive' or 'all'");
 
-            // Explicit stack; reversed pushes keep document order in the output.
-            // Children come from the requested UIA view, so the default control
-            // view drops the layout-only containers that eat observation tokens.
-            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
-            stack.Push(new KeyValuePair<AutomationElement, int>(root, 0));
-            while (stack.Count > 0)
+            var root = RootElementFor(handle);
+            // The walk is bounded separately from the node cap, so the cap is spent
+            // on controls worth showing instead of being eaten by layout wrappers.
+            var scanCap = maxNodes * 8;
+            if (scanCap < 400) scanCap = 400;
+            if (scanCap > 2000) scanCap = 2000;
+
+            var nodes = new List<Dictionary<string, object>>();
+            var parents = new List<int>();
+            var worth = new List<bool>();
+
+            var truncated = false;
+            var scanned = 0;
+            // True pre-order: a node is emitted when it is visited, then its
+            // children are pushed in reverse so the document order survives. That
+            // keeps the indented output in the same order as the screen.
+            var frames = new Stack<UiaFrame>();
+            frames.Push(new UiaFrame(root, 0, -1));
+            while (frames.Count > 0)
             {
-                if (nodes.Count >= maxNodes) { truncated = true; break; }
-                var frame = stack.Pop();
-                if (frame.Value >= maxDepth) continue;
-                var ordered = ViewChildren(walker, frame.Key);
-                ordered.Reverse();
-                foreach (var child in ordered)
+                if (scanned >= scanCap) { truncated = true; break; }
+                var frame = frames.Pop();
+                Dictionary<string, object> node;
+                try { node = UiaNode(frame.Element, frame.Depth, handle); }
+                catch { continue; } // element vanished mid-walk
+                var index = nodes.Count;
+                nodes.Add(node);
+                parents.Add(frame.Parent);
+                worth.Add(frame.Depth == 0 || IsWorthShowing(node));
+                scanned++;
+                if (frame.Depth >= maxDepth) continue;
+                var children = ViewChildren(walker, frame.Element);
+                children.Reverse();
+                foreach (var child in children)
+                    frames.Push(new UiaFrame(child, frame.Depth + 1, index));
+            }
+
+            var keep = new bool[nodes.Count];
+            for (var i = 0; i < nodes.Count; i++) keep[i] = filter == "all" || worth[i];
+            if (filter != "all")
+            {
+                // Keep the ancestors of everything worth showing: the tree stays
+                // readable and connected, minus the decorative layers.
+                for (var i = keep.Length - 1; i >= 0; i--)
                 {
-                    if (nodes.Count >= maxNodes) { truncated = true; break; }
-                    try
-                    {
-                        nodes.Add(UiaNode(child, frame.Value + 1, handle));
-                        stack.Push(new KeyValuePair<AutomationElement, int>(child, frame.Value + 1));
-                    }
-                    catch { } // element vanished mid-walk
+                    if (!keep[i]) continue;
+                    var parent = parents[i];
+                    while (parent >= 0 && !keep[parent]) { keep[parent] = true; parent = parents[parent]; }
                 }
             }
-            return Dict("nodes", nodes.ToArray(), "truncated", truncated, "view", view);
+
+            var outNodes = new List<object>();
+            var hidden = 0;
+            for (var i = 0; i < nodes.Count; i++)
+            {
+                if (!keep[i]) { hidden++; continue; }
+                if (outNodes.Count >= maxNodes) { truncated = true; continue; }
+                outNodes.Add(nodes[i]);
+            }
+            return Dict(
+                "nodes", outNodes.ToArray(),
+                "truncated", truncated,
+                "view", view,
+                "filter", filter,
+                "hidden", hidden);
         }
+
+        /// <summary>
+        /// Whether a node earns its place in an observation: it can be acted on,
+        /// it is labelled, or it is addressable. Unnamed pattern-less wrappers
+        /// contribute indentation and tokens but no usable target.
+        /// </summary>
+        private static bool IsWorthShowing(Dictionary<string, object> node)
+        {
+            var name = node["name"] as string;
+            if (!string.IsNullOrEmpty(name)) return true;
+            var autoId = node["automationId"] as string;
+            if (!string.IsNullOrEmpty(autoId)) return true;
+            var patterns = node["patterns"] as string[];
+            if (patterns != null)
+            {
+                foreach (var pattern in patterns) if (InteractivePatterns.Contains(pattern)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Patterns that make an element actionable or worth reading.</summary>
+        private static readonly HashSet<string> InteractivePatterns = new HashSet<string>(new string[]
+        {
+            "Invoke", "Toggle", "SelectionItem", "ExpandCollapse", "Value", "RangeValue",
+            "Select", "ScrollItem", "GridItem", "Text", "Selection", "Window", "Transform"
+        });
 
         private static object UiaFind(Dictionary<string, object> a)
         {

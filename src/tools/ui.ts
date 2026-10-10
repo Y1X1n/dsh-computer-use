@@ -1,6 +1,6 @@
 import type { ToolDeps } from '../types.js'
 import { clampInt } from './screenshot.js'
-import { renderUi } from './format.js'
+import { renderUi, detailOf } from './format.js'
 
 /**
  * UI Automation tools. This is the accessibility-first path: reading a control
@@ -16,7 +16,7 @@ const UIA_VIEWS = new Set(['control', 'content', 'raw'])
 export const uiTool = {
   name: 'computer_ui',
   description: `Read and drive UI through Windows UI Automation (works without vision). action: ${UIA_ACTIONS}. ` +
-    "tree: dump a compact control tree for a window (use first to understand an app); " +
+    "tree: dump a compact control tree for a window (use first to understand an app; unnamed layout wrappers are filtered out and password fields are redacted — detail:'full' shows every node); " +
     "find: locate controls by name/automationId and get their refs; " +
     "invoke/set_value/focus: act on a ref from a previous tree or find call. " +
     'Refs stay valid while the window lives. Prefer this over screenshots for buttons, fields and menus.',
@@ -62,6 +62,8 @@ export const uiTool = {
           maxDepth: Math.min(requestedDepth ?? cfg.uiaMaxDepth, cfg.uiaMaxDepth),
           maxNodes: Math.min(requestedNodes ?? cfg.uiaMaxNodes, cfg.uiaMaxNodes),
           view: typeof args.view === 'string' && UIA_VIEWS.has(args.view) ? args.view : undefined,
+          // detail:'full' means "everything": no interactive filter either.
+          filter: detailOf(args) === 'full' ? 'all' : undefined,
         })),
       }
     }

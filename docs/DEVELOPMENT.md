@@ -77,7 +77,7 @@
 | mouse.scroll | {x?,y?,deltaX?,deltaY?} | {x,y} |
 | keyboard.type | {text, intervalMs?} | {chars} |
 | keyboard.press | {keys:string[], action?:'press'\|'down'\|'up'} | {keys} |
-| uia.tree | {handle?, maxDepth?, maxNodes?, view?:'control'\|'content'\|'raw'} | {nodes:[{ref,runtimeId,depth,role,name,automationId,rect,patterns}], truncated, view} |
+| uia.tree | {handle?, maxDepth?, maxNodes?, view?:'control'\|'content'\|'raw', filter?:'interactive'\|'all'} | {nodes:[{ref,runtimeId,depth,role,name,automationId,enabled,offscreen,password,rect,patterns}], truncated, view, filter, hidden} |
 | uia.find | {handle?, name?, automationId?, controlType?, limit?} | {matches:[{ref,role,name,automationId,rect,patterns}]} |
 | uia.invoke | {ref?, handle?, name?, automationId?, action:'invoke'\|'select'\|'toggle'\|'expand'\|'collapse'\|'setValue'\|'focus', value?} | {ref, action, ok} |
 | clipboard.get | {} | {text} |
@@ -141,7 +141,11 @@ client.dispose()   // 结束子进程，幂等
 
 - **uia.tree**：扁平 nodes 数组（非嵌套，省缩进 token）；默认 `maxDepth=6`、`maxNodes=150`（配置 `uiaMaxDepth/uiaMaxNodes`）；`truncated:true` 明示被截断，模型可按需提高上限或用 `uia.find` 精确定位。模型看到的是 **compact 行**（`ref role "name" flags #automationId`，name 截 60），`detail:"full"` 才回原始 JSON（含 `runtimeId`）。
 - **默认 ControlView**：`view` 默认 `control`（`TreeWalker.ControlViewWalker`），只列真控件、跳过纯布局容器；实测同一窗口比 `raw` 省 **5%–46%** 字节（Terminal 29.5%、NVIDIA overlay 46%），`view:'raw'` 是"控件好像不见了"时的逃生门。`uia.find` 仍是全子树匹配（按名/ID 精确定位，不受视图影响），两者产出的 ref 可混用。
-- **ref 身份校验**：每个 ref 记下 UIA `RuntimeId`，`uia.invoke` 前比对——元素没了或**同一个 ref 现在指向别的控件**都报 `STALE_REF`，绝不把动作落到"顶替上来的那个控件"上。
+- **ref 身份校验**：每个 ref 记下 UIA `RuntimeId`，`uia.invoke` 前比对——元素没了或**同一个 ref 现在指向别的控件**都报 `STALE_REF`，绝不把动作落到"顶替上来的那个控件"上。注意 ref 是**每次观察重新分配**的（跨调用要重读 ref，runtimeId 才是稳定身份）。
+- **交互性过滤（默认开）**：`filter:'interactive'` 丢掉"没名字、没有可用 pattern"的节点，但**保留这些节点的祖先**，所以树仍然连贯可读；`hidden` 回报丢了几个（compact 行里会说明 `detail:"full"` 可看全）。`filter:'all'` 关掉过滤；工具层 `detail:'full'` 会自动切到 `all`。实测 ControlView 已经在前面挡掉了绝大多数容器，这一层主要兜底那些没有名字的叶子包装（Terminal 上还多滤掉 1 个）。
+- **节点状态标记**：每个节点带 `enabled`/`offscreen`/`password`，compact 行渲染成 `[pw]`/`[dis]`/`[off]`——模型不用去点一个已禁用的按钮，也知道某个控件当前不在可视区。
+- **密码字段脱敏**：`IsPassword` 为真的节点，名字一律替换成 `***redacted***`（凭据字段的标签也不外泄）。实测：本地 HTML 的 `<input type="password">` 在 Chrome 中暴露为 `password:true` 且名字已脱敏，相邻的普通输入框与地址栏不受影响。
+- **先序遍历**：节点按真正的先序（访问即输出、子节点反序入栈）产生，缩进顺序与屏幕上的控件顺序一致——此前是"同层子节点成组先输出且顺序相反"，缩进层级会对不上。
 - **HWND 兜底**：窗口不是桌面直接子元素时（工具窗、被别的进程托管的窗），`FindFirst(Children)` 找不到，改用 `AutomationElement.FromHandle` 直连；实测修掉了 `TextInputHost` 这类窗口的 `HWND_NOT_FOUND`。
 - **spill（落盘）**：clipboard.get 超 4000 字符只回 preview；截图走文件路径而非 base64（最大单项节省）。
 - **window.list**：`windowLimit` 默认 40 行，compact 行格式 `hwnd pid [min,fg] title`（title 截 70；`detail:"full"` 带 className/rect）。
@@ -221,6 +225,7 @@ client.dispose()   // 结束子进程，幂等
 | 截图预算 | ✅ 已实现（像素+字节双预算，实测 1200 token/张） | 按需微调默认值 |
 | 观察污染 | ✅ 截图前自动隐藏托管条（`overlaySuspended` 回报） | — |
 | 残留输入 | ✅ 输入账本 + 退出释放（`INPUT_HELD` / `Shutdown()`） | — |
+| 观察噪声 | ✅ ControlView + 交互性过滤（默认丢无名无 pattern 的包装，保祖先）+ 密码字段脱敏 + 节点状态标记 | — |
 | uia.tree diff | compact 树已实现（−78%），diff 未做 | compact 树 + "模型见过的树"基线 diff（ZCode tree_shown_to_model 语义） |
 | actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引（Anionex 用「观察令牌 + 过期拒绝」实现，见借鉴清单） |
 | 物理 Esc 中断 | 未做 | 低级钩子区分物理/注入输入（`LLKHF_INJECTED`），抑制窗口超时 **fail-open**；⚠️ 需要真实物理输入才能验收，不适合只靠 CI |
