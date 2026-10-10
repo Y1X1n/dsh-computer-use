@@ -287,6 +287,13 @@ namespace DshComputerUse
 
         public static object Run(string op, Dictionary<string, object> args)
         {
+            // Every op that changes the machine yields to a person who is using it.
+            // Reads never need to.
+            if (TakeoverGuard && InputWatcher.Takeover && IsActuation(op))
+                throw new BridgeException("USER_TAKEOVER",
+                    "the user is using the computer (physical input " + InputWatcher.LastPhysicalMsAgo +
+                    "ms ago); wait for it to settle and retry");
+
             switch (op)
             {
                 case "ping": return Ping();
@@ -311,8 +318,29 @@ namespace DshComputerUse
                 case "overlay.hide": return Overlay.Hide();
                 case "overlay.state": return Overlay.State();
                 case "control.state": return ControlState();
+                case "control.guard": return ControlGuard(args);
                 default:
                     throw new BridgeException("UNKNOWN_OP", "unknown op '" + op + "'");
+            }
+        }
+
+        /// <summary>Whether an op actuates the machine (as opposed to observing it).</summary>
+        private static bool IsActuation(string op)
+        {
+            switch (op)
+            {
+                case "window.focus":
+                case "window.state":
+                case "window.launch":
+                case "mouse.click":
+                case "mouse.drag":
+                case "mouse.scroll":
+                case "keyboard.type":
+                case "keyboard.press":
+                case "uia.invoke":
+                    return true;
+                default:
+                    return false;
             }
         }
 
@@ -1126,6 +1154,8 @@ namespace DshComputerUse
 
         private static readonly Dictionary<ushort, string> HeldKeys = new Dictionary<ushort, string>();
         private static readonly object InputGate = new object();
+        /// <summary>Whether actuation yields to a person using the machine. On by default.</summary>
+        private static volatile bool TakeoverGuard = true;
 
         private static void TrackKeysDown(ushort[] vks, string[] names)
         {
@@ -1187,6 +1217,7 @@ namespace DshComputerUse
         public static void Shutdown()
         {
             try { ReleaseHeldInput(); } catch { }
+            try { InputWatcher.Stop(); } catch { }
             try { Overlay.Hide(); } catch { }
         }
 
@@ -1196,7 +1227,32 @@ namespace DshComputerUse
                 "heldKeys", HeldKeyNames(),
                 "overlayVisible", Overlay.IsVisible,
                 "overlayHealthy", Overlay.IsHealthy,
-                "overlaySuspended", Overlay.SuspendedForCapture);
+                "overlaySuspended", Overlay.SuspendedForCapture,
+                "takeoverGuard", TakeoverGuard,
+                "physicalInput", InputWatcher.State());
+        }
+
+        /// <summary>
+        /// Turns the "yield to a person using the machine" rule on or off. On by
+        /// default: while someone is physically typing or moving the mouse, the
+        /// agent's own actuation waits its turn (reads are unaffected).
+        /// </summary>
+        private static object ControlGuard(Dictionary<string, object> a)
+        {
+            if (Has(a, "enabled") && a["enabled"] != null)
+            {
+                var raw = a["enabled"];
+                if (raw is bool) TakeoverGuard = (bool)raw;
+                else
+                {
+                    var text = Convert.ToString(raw);
+                    TakeoverGuard = string.Equals(text, "true", StringComparison.OrdinalIgnoreCase) || text == "1";
+                }
+            }
+            return Dict(
+                "takeoverGuard", TakeoverGuard,
+                "takeover", InputWatcher.Takeover,
+                "installed", InputWatcher.IsInstalled);
         }
 
         private static object KeyboardPress(Dictionary<string, object> a)
@@ -1781,6 +1837,242 @@ namespace DshComputerUse
     }
 
     /// <summary>
+    /// Watches for *physical* input while the agent is hosting, so a person who
+    /// starts typing or moving the mouse can take the machine back.
+    ///
+    /// Two deliberate properties, borrowed from Windows-MCP's control_hooks:
+    /// injected events carry LLKHF_INJECTED / LLMHF_INJECTED and never count as a
+    /// takeover (the agent must not trip over its own input), and the hook
+    /// procedure **always calls the next hook** — it never swallows a keystroke.
+    /// That is the fail-open part: a broken watcher can only stop detecting, it can
+    /// never lock the user out of their own keyboard.
+    ///
+    /// The hooks live only while the host indicator is up, so a machine nobody is
+    /// driving carries no global hook at all.
+    /// </summary>
+    internal static class InputWatcher
+    {
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WH_MOUSE_LL = 14;
+        private const int LLKHF_INJECTED = 0x10;
+        private const int LLMHF_INJECTED = 0x01;
+        private const int WM_QUIT = 0x0012;
+        /// <summary>How long after the last physical event the user counts as active.</summary>
+        private const int TakeoverIdleMs = 2000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KBDLLHOOKSTRUCT
+        {
+            public uint vkCode;
+            public uint scanCode;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSLLHOOKSTRUCT
+        {
+            public int x;
+            public int y;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSG
+        {
+            public IntPtr hwnd;
+            public uint message;
+            public IntPtr wParam;
+            public IntPtr lParam;
+            public uint time;
+            public int ptX;
+            public int ptY;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")]
+        private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+        [DllImport("user32.dll")]
+        private static extern bool TranslateMessage(ref MSG lpMsg);
+        [DllImport("user32.dll")]
+        private static extern IntPtr DispatchMessage(ref MSG lpMsg);
+        [DllImport("user32.dll")]
+        private static extern bool PostThreadMessage(uint idThread, uint msg, IntPtr wParam, IntPtr lParam);
+
+        private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        private static readonly object HookGate = new object();
+        /// <summary>Set once the hook thread finished installing (success or not).</summary>
+        private static readonly System.Threading.ManualResetEventSlim Started =
+            new System.Threading.ManualResetEventSlim(false);
+        // The delegates must stay rooted: a collected hook procedure turns into a
+        // crash the next time Windows calls it.
+        private static HookProc _keyProc;
+        private static HookProc _mouseProc;
+        private static IntPtr _keyHook = IntPtr.Zero;
+        private static IntPtr _mouseHook = IntPtr.Zero;
+        private static System.Threading.Thread _thread;
+        private static uint _threadId;
+        private static volatile bool _installed;
+        private static int _lastPhysicalTick;
+
+        private static Dictionary<string, object> Dict(params object[] pairs)
+        {
+            var d = new Dictionary<string, object>();
+            for (var i = 0; i + 1 < pairs.Length; i += 2) d[(string)pairs[i]] = pairs[i + 1];
+            return d;
+        }
+
+        public static bool IsInstalled { get { return _installed; } }
+
+        /// <summary>Milliseconds since the last physical event, or -1 if none was seen.</summary>
+        public static int LastPhysicalMsAgo
+        {
+            get
+            {
+                var last = _lastPhysicalTick;
+                if (last == 0) return -1;
+                return unchecked(Environment.TickCount - last);
+            }
+        }
+
+        /// <summary>Whether a person used the keyboard or mouse just now.</summary>
+        public static bool Takeover
+        {
+            get
+            {
+                var age = LastPhysicalMsAgo;
+                return age >= 0 && age < TakeoverIdleMs;
+            }
+        }
+
+        public static void Start()
+        {
+            lock (HookGate)
+            {
+                if (_thread != null) return;
+                _thread = new System.Threading.Thread(Run);
+                _thread.IsBackground = true;
+                _thread.Name = "cu-input-watcher";
+                _thread.Start();
+            }
+            // Wait for the hooks to be in place, so a caller that just started
+            // hosting can trust the "installed" it reads back.
+            Started.Wait(2000);
+        }
+
+        public static void Stop()
+        {
+            System.Threading.Thread thread;
+            uint threadId;
+            lock (HookGate)
+            {
+                thread = _thread;
+                threadId = _threadId;
+                _thread = null;
+            }
+            if (thread == null) return;
+            try { if (threadId != 0) PostThreadMessage(threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero); }
+            catch { }
+            try { thread.Join(1500); } catch { }
+            _installed = false;
+            Started.Reset();
+        }
+
+        private static void Run()
+        {
+            try
+            {
+                _threadId = GetCurrentThreadId();
+                _keyProc = KeyProc;
+                _mouseProc = MouseProc;
+                var module = GetModuleHandle(null);
+                _keyHook = SetWindowsHookEx(WH_KEYBOARD_LL, _keyProc, module, 0);
+                _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, module, 0);
+                // Partial success still counts: one working hook beats none, and the
+                // state reports what actually happened.
+                _installed = _keyHook != IntPtr.Zero || _mouseHook != IntPtr.Zero;
+                Started.Set();
+                MSG message;
+                while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0)
+                {
+                    TranslateMessage(ref message);
+                    DispatchMessage(ref message);
+                }
+            }
+            catch
+            {
+                _installed = false;
+                Started.Set();
+            }
+            finally
+            {
+                try { if (_keyHook != IntPtr.Zero) UnhookWindowsHookEx(_keyHook); } catch { }
+                try { if (_mouseHook != IntPtr.Zero) UnhookWindowsHookEx(_mouseHook); } catch { }
+                _keyHook = IntPtr.Zero;
+                _mouseHook = IntPtr.Zero;
+                _installed = false;
+            }
+        }
+
+        private static IntPtr KeyProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                if (nCode >= 0)
+                {
+                    var data = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+                    if ((data.flags & LLKHF_INJECTED) == 0) Note();
+                }
+            }
+            catch { }
+            // Never swallow: detection only, so a fault here cannot cost a keystroke.
+            return CallNextHookEx(_keyHook, nCode, wParam, lParam);
+        }
+
+        private static IntPtr MouseProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                if (nCode >= 0)
+                {
+                    var data = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                    if ((data.flags & LLMHF_INJECTED) == 0) Note();
+                }
+            }
+            catch { }
+            return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        }
+
+        private static void Note()
+        {
+            _lastPhysicalTick = Environment.TickCount;
+        }
+
+        public static object State()
+        {
+            return Dict(
+                "installed", _installed,
+                "takeover", Takeover,
+                "lastPhysicalMsAgo", LastPhysicalMsAgo,
+                "idleMs", TakeoverIdleMs);
+        }
+    }
+
+    /// <summary>
     /// Top-of-screen hosting strip: a black, click-through, always-on-top bar
     /// that tells the person at the keyboard that the agent is driving the
     /// desktop. It renders on its own STA thread with a private message loop, so
@@ -1897,6 +2189,10 @@ namespace DshComputerUse
             _visible = true;
             _appliedGeneration = generation;
             _lastError = null;
+            // Hosting is visible, so from now on a person can take the machine back
+            // by simply typing: watch for physical input. The hooks are installed
+            // here and removed on hide, so an idle machine carries none.
+            InputWatcher.Start();
             return Dict(
                 "shown", true, "healthy", true, "generation", generation,
                 "text", text, "width", StripWidth, "height", StripHeight);
@@ -1925,6 +2221,8 @@ namespace DshComputerUse
             _visible = false;
             _appliedGeneration = generation;
             _lastError = null;
+            // Detection only matters while the indicator claims the agent is hosting.
+            InputWatcher.Stop();
             return Dict("shown", false, "healthy", true, "generation", generation);
         }
 

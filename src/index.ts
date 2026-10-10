@@ -98,6 +98,9 @@ export function apply(ctx: Context, config: unknown): void {
     if (!cfg.enabled || !cfg.overlay) { hideOverlay(); return }
     if (!overlayShown) {
       overlayShown = true
+      // The bridge installs its input watcher the moment hosting becomes visible,
+      // so the guard setting has to be in place before the strip goes up.
+      void getBridge().call('control.guard', { enabled: cfg.takeoverGuard }).catch(() => undefined)
       void getBridge().call('overlay.show', { text: cfg.overlayText }).catch(() => { overlayShown = false })
     }
     if (idleTimer) clearTimeout(idleTimer)

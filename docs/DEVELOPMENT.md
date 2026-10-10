@@ -85,7 +85,8 @@
 | overlay.show | {text?} | {shown, healthy, generation, text, width, height[, error]} |
 | overlay.hide | {} | {shown:false, healthy, generation[, error]} |
 | overlay.state | {} | {shown, healthy, width, height, defaultText, generation, appliedGeneration, error} |
-| control.state | {} | {heldKeys:[], overlayVisible, overlayHealthy, overlaySuspended} |
+| control.state | {} | {heldKeys:[], overlayVisible, overlayHealthy, overlaySuspended, takeoverGuard, physicalInput:{installed,takeover,lastPhysicalMsAgo,idleMs}} |
+| control.guard | {enabled} | {takeoverGuard, takeover, installed} |
 
 > `screen.capture` 的 `budgetKb`（base64 字节）与 `budgetPixels`（宽×高）是**硬预算**：超限时先按步长 15 降质（下限 40），再按 ×0.8 缩边（下限 320），像素预算先一步精确适配。返回值里的 `quality`/`base64Bytes` 是**实际写入**的值；`overlaySuspended` 表示这次截图前把托管条藏起来了。
 >
@@ -174,6 +175,8 @@ client.dispose()   // 结束子进程，幂等
 5. **托管可见**：agent 一旦开始操作，屏幕顶部出现黑底白字椭圆条「Deepseek Harness托管中」（`overlay.show`），鼠标穿透、不抢焦点、不进 Alt-Tab；插件卸载/总开关关闭/空闲超时即消失，桥进程退出时窗口随进程一起消失。文案与开关见 `computer-use.overlay*`。
 6. **观察不被污染**：截图前 `Overlay.SuspendForCapture()` 把托管条藏起来（默认 70ms 让合成器跟上），截完恢复——否则 agent 会把自己的指示条截进画面，既浪费顶部像素也让模型误判。返回值 `overlaySuspended` 报告这次是否藏过。
 7. **不留残留输入**：`keyboard.press action:'down'` 记入输入账本，重复按下报 `INPUT_HELD`；桥进程退出时 `Engine.Shutdown()` 释放所有仍按住的键。这条防的是"调用方死在 down 与 up 之间，用户的 Shift/Ctrl 被永久按住"（机制借鉴 Windows-MCP `control_ledger.py`，见 [borrow-mit-projects.md](./borrow-mit-projects.md)）。
+8. **人工接管优先**：托管期间（指示条可见时）桥安装 `WH_KEYBOARD_LL`/`WH_MOUSE_LL` 钩子，只统计**物理**输入——带 `LLKHF_INJECTED`/`LLMHF_INJECTED` 的注入事件一律不计，所以 agent 不会踩到自己的输入。检测到人最近 2s 内动过键鼠时，**会改变机器的 op**（`mouse.*` / `keyboard.*` / `window.focus|state|launch` / `uia.invoke`）报 `USER_TAKEOVER` 让路；**读取类 op 不受影响**。钩子过程**永远调用下一个钩子、从不吞键**——这是 fail-open：钩子出问题最多"检测失灵"，绝不会把用户锁在自己的键盘外面。开关 `computer-use.takeoverGuard`（默认开）。钩子随托管显示/隐藏装卸，所以没有 agent 在托管时，机器上不存在任何全局钩子。
+   > ⚠️ **正例只能人工验收**：`SendInput` 一律带注入标记，脚本造不出真·物理事件。命令：`node scripts/verify-takeover.mjs`（显示托管条 → 你按键/晃鼠标 → 检查 takeover 与 `USER_TAKEOVER`）。自动化测试只覆盖反例：注入输入**不得**被计为物理输入，以及钩子随托管装卸。
 
 二期候选（对照调研 §5）：
 
@@ -232,8 +235,8 @@ client.dispose()   // 结束子进程，幂等
 | 残留输入 | ✅ 输入账本 + 退出释放（`INPUT_HELD` / `Shutdown()`） | — |
 | 观察噪声 | ✅ ControlView + 交互性过滤（默认丢无名无 pattern 的包装，保祖先）+ 密码字段脱敏 + 节点状态标记 | — |
 | uia.tree diff | compact 树已实现（−78%），diff 未做 | compact 树 + "模型见过的树"基线 diff（ZCode tree_shown_to_model 语义） |
-| actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引（Anionex 用「观察令牌 + 过期拒绝」实现，见借鉴清单） |
-| 物理 Esc 中断 | 未做 | 低级钩子区分物理/注入输入（`LLKHF_INJECTED`），抑制窗口超时 **fail-open**；⚠️ 需要真实物理输入才能验收，不适合只靠 CI |
+| 人工接管 | ✅ 物理输入检测（钩子随托管装卸、从不吞键）+ 接管期间 `USER_TAKEOVER` 让路；正例见 `scripts/verify-takeover.mjs` 人工验收 | Esc 专属取消键未做；要做就在钩子里加取消标志 |
+| actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引（观察令牌/过期拒绝已实现，见 §4.2） |
 | 冷启动 | ✅ 插件加载预热 ping + **引擎汇编按源码 hash 缓存**（`%LOCALAPPDATA%\dsh-computer-use\engine-cache`）：冷启动 1090ms → **258ms**，第二次 ping 1–2ms | 若还要更快只剩换宿主（PS 进程本身占 185ms） |
 | UIA 寻址 | ✅ 默认 ControlView（省 5–46% 字节）+ RuntimeId 身份校验（指向别的控件即 `STALE_REF`）+ `FromHandle` 兜底非桌面子窗口 | — |
 | 多会话租约 | 无 | §6.4，接 MCP 前置条件 |
