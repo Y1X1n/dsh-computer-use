@@ -132,6 +132,33 @@ await test('ui tool forwards the requested UIA view and rejects unknown ones', a
   assert.equal(bridge.calls[1].args.view, undefined, 'an unknown view must fall back to the bridge default')
 })
 
+await test('ui tool asks for every node when detail is full', async () => {
+  const bridge = fakeBridge({ 'uia.tree': (a) => ({ nodes: [], truncated: false, filter: a.filter }) })
+  setUiDeps({ call: bridge.call, config: () => config })
+  await uiTool.execute({ action: 'tree', detail: 'full' }, { signal: new AbortController().signal })
+  assert.equal(bridge.calls[0].args.filter, 'all', "detail:'full' must disable the interactive filter")
+  await uiTool.execute({ action: 'tree' }, { signal: new AbortController().signal })
+  assert.equal(bridge.calls[1].args.filter, undefined, 'the bridge default filter applies otherwise')
+})
+
+await test('ui tree renders state flags and the hidden count', async () => {
+  const nodes = [
+    { ref: 1, depth: 0, role: 'Window', name: 'App' },
+    { ref: 2, depth: 1, role: 'Edit', name: '***redacted***', password: true, patterns: ['Value'] },
+    { ref: 3, depth: 1, role: 'Button', name: 'Save', enabled: false, patterns: ['Invoke'] },
+    { ref: 4, depth: 1, role: 'Text', name: 'Below the fold', offscreen: true },
+  ]
+  const text = uiTool.output.render(
+    { action: 'tree' },
+    { action: 'tree', nodes, truncated: false, hidden: 7, filter: 'interactive' },
+  )[0].text
+  assert.ok(text.startsWith('tree nodes=4 hidden=7'), text)
+  assert.ok(text.includes('edit [pw]'), text)
+  assert.ok(text.includes('press [dis]'), text)
+  assert.ok(text.includes('[off]'), text)
+  assert.ok(/detail:"full" shows every node/.test(text), 'the hidden count must be explained')
+})
+
 await test('screenshot tool refuses to run while disabled', async () => {
   const bridge = fakeBridge({ 'screen.capture': () => ({ path: 'x' }) })
   setScreenshotDeps({ call: bridge.call, config: () => ({ ...config, enabled: false }) })

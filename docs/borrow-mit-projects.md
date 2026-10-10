@@ -65,6 +65,6 @@
 | UIA ControlView + RuntimeId 寻址 | Yu-tao-Li-win / FlaUI | ✅ `Engine.cs`：`view` 默认 `control`（实测省 5–46% 字节）、ref 记 RuntimeId 做身份校验、`AutomationElement.FromHandle` 兜底非桌面子窗口 |
 | 观察令牌 + 过期拒绝 + diff | Anionex | 待办（对应 `docs/DEVELOPMENT.md` §7 的 `actionSent`） |
 | `computer_wait` 有界轮询 | Anionex | 待办 |
-| 交互性打分筛选 + 敏感字段脱敏 | browser-use / FlaUI | 待办：`src/tools/format.ts` 的紧凑渲染 |
+| 交互性打分筛选 + 敏感字段脱敏 | browser-use / FlaUI | ✅ `Engine.cs` `IsWorthShowing`（无名无 pattern 的节点丢弃、祖先保留）+ `IsPassword` 脱敏 + `enabled/offscreen` 标记，渲染成 `[pw]/[dis]/[off]` |
 
 > 已落地项在本文件更新时同步勾掉，并在 commit message 里注明来源仓库。

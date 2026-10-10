@@ -255,6 +255,47 @@ try {
     await expectCallError(client.call('uia.tree', { handle: launchedHandle, view: 'nonsense' }), 'INVALID_ARGS')
   })
 
+  await test('uia.tree: interactive filter keeps exactly the labelled/reachable nodes', async () => {
+    const opts = { handle: launchedHandle, maxDepth: 8, maxNodes: 150 }
+    const filtered = await client.call('uia.tree', opts)
+    assert.equal(filtered.filter, 'interactive', 'the default filter must be reported')
+    const all = await client.call('uia.tree', { ...opts, filter: 'all' })
+    assert.equal(all.filter, 'all')
+    assert.equal(all.hidden, 0, 'filter=all must not hide anything')
+    assert.ok(all.nodes.length >= filtered.nodes.length)
+
+    // Rebuild the expected kept set from the unfiltered walk: a node survives when
+    // it can be acted on, is labelled/addressable, is the root, or is the ancestor
+    // of such a node. This is the contract, independent of the window.
+    const INTERACTIVE = new Set([
+      'Invoke', 'Toggle', 'SelectionItem', 'ExpandCollapse', 'Value', 'RangeValue',
+      'Select', 'ScrollItem', 'GridItem', 'Text', 'Selection', 'Window', 'Transform',
+    ])
+    const keep = all.nodes.map(
+      (n) => n.depth === 0 || Boolean(n.name) || Boolean(n.automationId) || (n.patterns ?? []).some((p) => INTERACTIVE.has(p)),
+    )
+    const atDepth = []
+    for (let i = 0; i < all.nodes.length; i++) {
+      const depth = all.nodes[i].depth
+      atDepth[depth] = i
+      if (depth > 0 && keep[i]) {
+        for (let d = depth - 1; d >= 0; d--) if (atDepth[d] !== undefined) keep[atDepth[d]] = true
+      }
+    }
+    // Refs are per-call, so compare identities instead: (depth, role, name,
+    // automationId, runtimeId) is stable across the two walks of the same window.
+    const key = (n) => `${n.depth}|${n.role}|${n.name ?? ''}|${n.automationId ?? ''}|${n.runtimeId ?? ''}`
+    const expected = all.nodes.filter((_, i) => keep[i]).map(key)
+    assert.deepEqual(filtered.nodes.map(key), expected)
+    assert.equal(filtered.hidden, all.nodes.length - expected.length)
+
+    const sample = all.nodes.find((n) => n.depth > 0)
+    for (const key of ['enabled', 'offscreen', 'password']) {
+      assert.equal(typeof sample[key], 'boolean', `node must carry a boolean ${key}`)
+    }
+    await expectCallError(client.call('uia.tree', { handle: launchedHandle, filter: 'nonsense' }), 'INVALID_ARGS')
+  })
+
   await test('uia.find + uia.invoke: focus a control by type', async () => {
     // Win11 notepad exposes its editor as Document (WinUI3), classic builds
     // as Edit — accept either so the test holds on both.
