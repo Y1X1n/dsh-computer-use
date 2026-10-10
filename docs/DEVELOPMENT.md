@@ -77,7 +77,7 @@
 | mouse.scroll | {x?,y?,deltaX?,deltaY?} | {x,y} |
 | keyboard.type | {text, intervalMs?} | {chars} |
 | keyboard.press | {keys:string[], action?:'press'\|'down'\|'up'} | {keys} |
-| uia.tree | {handle?, maxDepth?, maxNodes?} | {nodes:[{ref,depth,role,name,automationId,rect,patterns}], truncated} |
+| uia.tree | {handle?, maxDepth?, maxNodes?, view?:'control'\|'content'\|'raw'} | {nodes:[{ref,runtimeId,depth,role,name,automationId,rect,patterns}], truncated, view} |
 | uia.find | {handle?, name?, automationId?, controlType?, limit?} | {matches:[{ref,role,name,automationId,rect,patterns}]} |
 | uia.invoke | {ref?, handle?, name?, automationId?, action:'invoke'\|'select'\|'toggle'\|'expand'\|'collapse'\|'setValue'\|'focus', value?} | {ref, action, ok} |
 | clipboard.get | {} | {text} |
@@ -139,7 +139,10 @@ client.dispose()   // 结束子进程，幂等
 
 ### 4.2 结构化结果
 
-- **uia.tree**：扁平 nodes 数组（非嵌套，省缩进 token）；默认 `maxDepth=6`、`maxNodes=150`（配置 `uiaMaxDepth/uiaMaxNodes`）；`truncated:true` 明示被截断，模型可按需提高上限或用 `uia.find` 精确定位。模型看到的是 **compact 行**（`ref role "name" flags #automationId`，name 截 60），`detail:"full"` 才回原始 JSON。
+- **uia.tree**：扁平 nodes 数组（非嵌套，省缩进 token）；默认 `maxDepth=6`、`maxNodes=150`（配置 `uiaMaxDepth/uiaMaxNodes`）；`truncated:true` 明示被截断，模型可按需提高上限或用 `uia.find` 精确定位。模型看到的是 **compact 行**（`ref role "name" flags #automationId`，name 截 60），`detail:"full"` 才回原始 JSON（含 `runtimeId`）。
+- **默认 ControlView**：`view` 默认 `control`（`TreeWalker.ControlViewWalker`），只列真控件、跳过纯布局容器；实测同一窗口比 `raw` 省 **5%–46%** 字节（Terminal 29.5%、NVIDIA overlay 46%），`view:'raw'` 是"控件好像不见了"时的逃生门。`uia.find` 仍是全子树匹配（按名/ID 精确定位，不受视图影响），两者产出的 ref 可混用。
+- **ref 身份校验**：每个 ref 记下 UIA `RuntimeId`，`uia.invoke` 前比对——元素没了或**同一个 ref 现在指向别的控件**都报 `STALE_REF`，绝不把动作落到"顶替上来的那个控件"上。
+- **HWND 兜底**：窗口不是桌面直接子元素时（工具窗、被别的进程托管的窗），`FindFirst(Children)` 找不到，改用 `AutomationElement.FromHandle` 直连；实测修掉了 `TextInputHost` 这类窗口的 `HWND_NOT_FOUND`。
 - **spill（落盘）**：clipboard.get 超 4000 字符只回 preview；截图走文件路径而非 base64（最大单项节省）。
 - **window.list**：`windowLimit` 默认 40 行，compact 行格式 `hwnd pid [min,fg] title`（title 截 70；`detail:"full"` 带 className/rect）。
 - **Chromium 提示**：UIA 树为空且窗口是 Chromium 时，工具输出直接附上 `--force-renderer-accessibility` 的修复指引；`window.launch` 对 chrome/edge/brave/chromium/vivaldi **自动补该参数**（`computer-use.browserUiaFlags`，默认开）。
@@ -222,6 +225,6 @@ client.dispose()   // 结束子进程，幂等
 | actionSent | 无 | 超时/异常区分"未下发/可能已下发"，工具层给"先观察再重试"指引（Anionex 用「观察令牌 + 过期拒绝」实现，见借鉴清单） |
 | 物理 Esc 中断 | 未做 | 低级钩子区分物理/注入输入（`LLKHF_INJECTED`），抑制窗口超时 **fail-open**；⚠️ 需要真实物理输入才能验收，不适合只靠 CI |
 | 冷启动 | ✅ 插件加载预热 ping + **引擎汇编按源码 hash 缓存**（`%LOCALAPPDATA%\dsh-computer-use\engine-cache`）：冷启动 1090ms → **258ms**，第二次 ping 1–2ms | 若还要更快只剩换宿主（PS 进程本身占 185ms） |
-| UIA 寻址 | 自增整数 ref，窗口消失即失效 | 改用 UIA RuntimeId（刷新后稳定），并暴露 ControlView 视图省 token |
+| UIA 寻址 | ✅ 默认 ControlView（省 5–46% 字节）+ RuntimeId 身份校验（指向别的控件即 `STALE_REF`）+ `FromHandle` 兜底非桌面子窗口 | — |
 | 多会话租约 | 无 | §6.4，接 MCP 前置条件 |
 | 窗口还原副作用 | PrintWindow 规避 | 保持默认；若引入 WGC 后端（Windows.Graphics.Capture via WinRT），可后台截最小化窗口且零焦点干扰 |

@@ -240,6 +240,21 @@ try {
     assert.ok(node.rect.width >= 0 && node.rect.height >= 0)
   })
 
+  await test('uia.tree: control view by default, raw exposes at least as much', async () => {
+    const control = await client.call('uia.tree', { handle: launchedHandle, maxDepth: 6, maxNodes: 150 })
+    assert.equal(control.view, 'control', 'the default view must be reported')
+    assert.ok('runtimeId' in control.nodes[0], 'nodes must carry the UIA runtime identity')
+    const raw = await client.call('uia.tree', { handle: launchedHandle, maxDepth: 6, maxNodes: 150, view: 'raw' })
+    assert.equal(raw.view, 'raw')
+    assert.ok(
+      raw.nodes.length >= control.nodes.length,
+      `raw view (${raw.nodes.length}) must not expose fewer nodes than control (${control.nodes.length})`,
+    )
+    const content = await client.call('uia.tree', { handle: launchedHandle, maxDepth: 6, maxNodes: 150, view: 'content' })
+    assert.equal(content.view, 'content')
+    await expectCallError(client.call('uia.tree', { handle: launchedHandle, view: 'nonsense' }), 'INVALID_ARGS')
+  })
+
   await test('uia.find + uia.invoke: focus a control by type', async () => {
     // Win11 notepad exposes its editor as Document (WinUI3), classic builds
     // as Edit — accept either so the test holds on both.

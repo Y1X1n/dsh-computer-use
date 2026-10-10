@@ -10,6 +10,8 @@ import { renderUi } from './format.js'
  */
 
 const UIA_ACTIONS = 'tree | find | invoke | set_value | focus'
+/** UIA tree views the bridge accepts; anything else falls back to its default. */
+const UIA_VIEWS = new Set(['control', 'content', 'raw'])
 
 export const uiTool = {
   name: 'computer_ui',
@@ -28,7 +30,13 @@ export const uiTool = {
     value: { type: 'string', description: "New value (action='set_value')." },
     maxDepth: { type: 'integer', description: "Tree depth cap (action='tree'). Default from settings." },
     maxNodes: { type: 'integer', description: 'Node cap; response is truncated beyond it.' },
-    detail: { type: 'string', description: "'compact' (default: one line per control) or 'full' (raw JSON with rects/class names)." },
+    view: {
+      type: 'string',
+      description:
+        "UIA view for action='tree'. 'control' (default) lists real controls and skips layout-only containers; " +
+        "'content' keeps content elements; 'raw' exposes every provider element when something seems missing.",
+    },
+    detail: { type: 'string', description: "'compact' (default: one line per control) or 'full' (raw JSON with rects/runtime ids)." },
   },
   output: { schema: { type: 'object' }, render: (a: unknown, v: unknown) => [{ type: 'text', text: renderUi(a, v) }] },
   timeoutMs: 45_000,
@@ -53,6 +61,7 @@ export const uiTool = {
           handle,
           maxDepth: Math.min(requestedDepth ?? cfg.uiaMaxDepth, cfg.uiaMaxDepth),
           maxNodes: Math.min(requestedNodes ?? cfg.uiaMaxNodes, cfg.uiaMaxNodes),
+          view: typeof args.view === 'string' && UIA_VIEWS.has(args.view) ? args.view : undefined,
         })),
       }
     }

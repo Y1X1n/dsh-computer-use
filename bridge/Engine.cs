@@ -595,8 +595,62 @@ namespace DshComputerUse
         private static readonly List<long> RefsUnderSweep = new List<long>();
         private static readonly Dictionary<long, AutomationElement> UiaElements = new Dictionary<long, AutomationElement>();
         private static readonly Dictionary<string, List<long>> UiaByWindow = new Dictionary<string, List<long>>();
+        /// <summary>
+        /// UIA runtime identity per reference. A ref must keep pointing at the same
+        /// underlying control, otherwise an action could land on whatever took its
+        /// place — borrow from FlaUI/Yu-tao-Li: identity, not just liveness.
+        /// </summary>
+        private static readonly Dictionary<long, int[]> UiaRuntimeIds = new Dictionary<long, int[]>();
         private static long _nextRef = 1;
         private static int _captureSeq;
+
+        private static void ForgetElement(long reference)
+        {
+            UiaElements.Remove(reference);
+            UiaRuntimeIds.Remove(reference);
+        }
+
+        private static bool SameRuntimeId(int[] a, int[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (var i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        private static string RuntimeIdText(int[] id)
+        {
+            if (id == null || id.Length == 0) return null;
+            var parts = new string[id.Length];
+            for (var i = 0; i < id.Length; i++) parts[i] = id[i].ToString();
+            return string.Join(".", parts);
+        }
+
+        private static TreeWalker WalkerFor(string view)
+        {
+            if (string.IsNullOrEmpty(view) || view == "control") return TreeWalker.ControlViewWalker;
+            if (view == "content") return TreeWalker.ContentViewWalker;
+            if (view == "raw") return TreeWalker.RawViewWalker;
+            throw new BridgeException("INVALID_ARGS", "view must be one of control / content / raw");
+        }
+
+        private static List<AutomationElement> ViewChildren(TreeWalker walker, AutomationElement parent)
+        {
+            var children = new List<AutomationElement>();
+            try
+            {
+                var child = walker.GetFirstChild(parent);
+                while (child != null)
+                {
+                    children.Add(child);
+                    child = walker.GetNextSibling(child);
+                }
+            }
+            catch
+            {
+                // A tree can change under us mid-walk; keep whatever we collected.
+            }
+            return children;
+        }
 
         private static object WindowList(Dictionary<string, object> a)
         {
@@ -1188,15 +1242,25 @@ namespace DshComputerUse
             // The NativeWindowHandle property condition must box an Int32.
             var cond = new PropertyCondition(AutomationElement.NativeWindowHandleProperty, (int)handle.Value);
             var el = root.FindFirst(TreeScope.Children, cond);
-            if (el == null)
-                throw new BridgeException("HWND_NOT_FOUND", "no UIA element for handle " + handle.Value);
-            return el;
+            if (el != null) return el;
+            // Not every window is a direct child of the desktop: tool windows,
+            // owned windows and windows hosted by another process are reachable
+            // only through the HWND. Without this they looked like "no UIA element".
+            try
+            {
+                var direct = AutomationElement.FromHandle(new IntPtr(handle.Value));
+                if (direct != null) return direct;
+            }
+            catch { }
+            throw new BridgeException("HWND_NOT_FOUND", "no UIA element for handle " + handle.Value);
         }
 
         private static long RegisterElement(AutomationElement el, long? hwnd)
         {
             var reference = _nextRef++;
             UiaElements[reference] = el;
+            try { UiaRuntimeIds[reference] = el.GetRuntimeId(); }
+            catch { } // some providers do not expose a runtime id; liveness still applies
             if (hwnd.HasValue && hwnd.Value != 0)
             {
                 var key = hwnd.Value.ToString();
@@ -1213,6 +1277,7 @@ namespace DshComputerUse
             {
                 UiaElements.Clear();
                 UiaByWindow.Clear();
+                UiaRuntimeIds.Clear();
             }
             return reference;
         }
@@ -1229,7 +1294,7 @@ namespace DshComputerUse
             }
             foreach (var key in dead)
             {
-                foreach (var reference in UiaByWindow[key]) UiaElements.Remove(reference);
+                foreach (var reference in UiaByWindow[key]) ForgetElement(reference);
                 UiaByWindow.Remove(key);
             }
         }
@@ -1255,8 +1320,12 @@ namespace DshComputerUse
             var role = "Unknown";
             try { role = c.ControlType.ProgrammaticName.Replace("ControlType.", string.Empty); } catch { }
 
+            int[] runtimeId = null;
+            try { runtimeId = el.GetRuntimeId(); } catch { }
+
             return Dict(
                 "ref", RegisterElement(el, hwnd),
+                "runtimeId", RuntimeIdText(runtimeId),
                 "depth", depth,
                 "role", role,
                 "name", name,
@@ -1277,10 +1346,14 @@ namespace DshComputerUse
             if (maxNodes > 400) maxNodes = 400;
 
             var root = RootElementFor(handle);
+            var view = Str(a, "view", "control");
+            var walker = WalkerFor(view);
             var nodes = new List<object> { UiaNode(root, 0, handle) };
             var truncated = false;
 
             // Explicit stack; reversed pushes keep document order in the output.
+            // Children come from the requested UIA view, so the default control
+            // view drops the layout-only containers that eat observation tokens.
             var stack = new Stack<KeyValuePair<AutomationElement, int>>();
             stack.Push(new KeyValuePair<AutomationElement, int>(root, 0));
             while (stack.Count > 0)
@@ -1288,14 +1361,7 @@ namespace DshComputerUse
                 if (nodes.Count >= maxNodes) { truncated = true; break; }
                 var frame = stack.Pop();
                 if (frame.Value >= maxDepth) continue;
-                AutomationElementCollection children;
-                try
-                {
-                    children = frame.Key.FindAll(TreeScope.Children, Condition.TrueCondition);
-                }
-                catch { continue; }
-                var ordered = new List<AutomationElement>();
-                foreach (AutomationElement child in children) ordered.Add(child);
+                var ordered = ViewChildren(walker, frame.Key);
                 ordered.Reverse();
                 foreach (var child in ordered)
                 {
@@ -1308,7 +1374,7 @@ namespace DshComputerUse
                     catch { } // element vanished mid-walk
                 }
             }
-            return Dict("nodes", nodes.ToArray(), "truncated", truncated);
+            return Dict("nodes", nodes.ToArray(), "truncated", truncated, "view", view);
         }
 
         private static object UiaFind(Dictionary<string, object> a)
@@ -1374,8 +1440,22 @@ namespace DshComputerUse
                 try { var probe = el.Current.AutomationId; }
                 catch
                 {
-                    UiaElements.Remove(reference);
+                    ForgetElement(reference);
                     throw new BridgeException("STALE_REF", "ref " + reference + " points at an element that is gone; re-run uia.tree / uia.find");
+                }
+                // Identity, not just liveness: refuse to act when this reference now
+                // resolves to a different control than the one that was observed.
+                int[] expected;
+                if (UiaRuntimeIds.TryGetValue(reference, out expected) && expected != null)
+                {
+                    int[] current = null;
+                    try { current = el.GetRuntimeId(); } catch { }
+                    if (current != null && !SameRuntimeId(expected, current))
+                    {
+                        ForgetElement(reference);
+                        throw new BridgeException("STALE_REF",
+                            "ref " + reference + " now refers to a different control (the UI was rebuilt); re-run uia.tree / uia.find");
+                    }
                 }
                 return new KeyValuePair<AutomationElement, long>(el, reference);
             }
